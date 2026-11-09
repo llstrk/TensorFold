@@ -88,10 +88,25 @@ pub fn linear(
         const st = g.c.linearAt(index);
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
-        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, qc + off * kw * 4, next, n, ch, d.conv, .{
+        // a kept row inside the chunk: the conv to it, its state aside, then on (the sums of two chunks split there)
+        var from: usize = 0;
+        var state = st.conv;
+        if (g.mark) |mk| {
+            const side = g.c.sideLinear(mk.side, index).conv;
+            try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, qc + off * kw * 4, side, mk.row, ch, d.conv, .{
+                .key_width = kw,
+                .k = kc + off * kw * 4,
+                .v = v + off * vw * 4,
+                .norm = qk_norm,
+            });
+            from = mk.row;
+            state = side;
+        }
+        const r0 = off + from;
+        try o.convPrefill(forward.at(qkv, r0 * ch), l.conv, state, qc + r0 * kw * 4, next, n - from, ch, d.conv, .{
             .key_width = kw,
-            .k = kc + off * kw * 4,
-            .v = v + off * vw * 4,
+            .k = kc + r0 * kw * 4,
+            .v = v + r0 * vw * 4,
             .norm = qk_norm,
         });
         if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
@@ -134,15 +149,45 @@ fn recur(
     for (segs) |g| {
         const n = g.tokens.len;
         const snaps: ?u64 = if (window) g.c.snapshot(index, 0).state else null;
+        var from: usize = 0;
+        if (g.mark) |mk| {
+            // a kept row inside the chunk: the rule to it, its state aside, the rule on from there
+            const st = g.c.linearAt(index).state;
+            const part = o.arena.mark();
+            try o.gatedDelta(
+                q + off * kw * 4,
+                k + off * kw * 4,
+                v + off * vw * 4,
+                gate + off * d.value_heads * 4,
+                beta + off * d.value_heads * 4,
+                st,
+                y + off * vw * 4,
+                mk.row,
+                d.key_heads,
+                d.value_heads,
+                d.key_dim,
+                d.value_dim,
+                null,
+            );
+            o.arena.release(part); // its scratch: the next launches on the stream run after it
+            if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
+                @ptrFromInt(g.c.sideLinear(mk.side, index).state),
+                @ptrFromInt(st),
+                g.c.layout.state_bytes,
+                o.stream,
+            ));
+            from = mk.row;
+        }
+        const r0 = off + from;
         try o.gatedDelta(
-            q + off * kw * 4,
-            k + off * kw * 4,
-            v + off * vw * 4,
-            gate + off * d.value_heads * 4,
-            beta + off * d.value_heads * 4,
+            q + r0 * kw * 4,
+            k + r0 * kw * 4,
+            v + r0 * vw * 4,
+            gate + r0 * d.value_heads * 4,
+            beta + r0 * d.value_heads * 4,
             g.c.linearAt(index).state,
-            y + off * vw * 4,
-            n,
+            y + r0 * vw * 4,
+            n - from,
             d.key_heads,
             d.value_heads,
             d.key_dim,
