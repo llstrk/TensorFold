@@ -1,4 +1,4 @@
-//! Flash Next's two sparse attention kernels on the same rows: the lanes kernel's parts equal the scalar kernel's bits.
+//! Flash Next's sparse attention kernels on the same rows: the lanes kernel's bits, and sparse=wmma near the scalar's.
 const std = @import("std");
 const rig = @import("rig.zig");
 const fx = @import("flashnext.zig");
@@ -107,4 +107,102 @@ fn same(t: *Rig, s: Shape, kind: c_int, seed: u64) !void {
             .{ kind, s.heads, s.kv_heads, s.dims, s.parts, b, i, x, y },
         );
     }
+}
+
+test "sparse=wmma: the WMMA attention, merged after or in its launch, sits within BF16 rounding of the scalar kernel" {
+    const t = try Rig.open(1 << 22);
+    defer t.close();
+    const caps = @import("../caps.zig").Caps.of(@import("../kernels.zig").arch) orelse return error.SkipZigTest;
+    if (caps.matrix != .wmma11) return error.SkipZigTest;
+    t.on.sparse_wmma = true;
+    defer t.on.sparse_wmma = false;
+    var worst: f64 = 0;
+    for ([_]Shape{
+        .{ .heads = 24, .kv_heads = 2, .dims = 256, .parts = 16 },
+        .{ .heads = 6, .kv_heads = 1, .dims = 256, .parts = 8 },
+        .{ .heads = 16, .kv_heads = 2, .dims = 256, .parts = 16 },
+    }, 0..) |s, i| worst = @max(worst, try near(t, s, 0xB1F + i));
+    std.debug.print("SPARSE_WMMA worst |wmma - scalar| = {e:.3} (values in [-2, 2])\n", .{worst});
+}
+
+/// The scalar kernel's output against sparse=wmma's, plain and merged in its launch: the largest difference.
+fn near(t: *Rig, s: Shape, seed: u64) !f64 {
+    var rng: rig.Rng = .{ .state = seed };
+    const heads: usize = @intCast(s.heads);
+    const kvh: usize = @intCast(s.kv_heads);
+    const dims: usize = @intCast(s.dims);
+    const parts: usize = @intCast(s.parts);
+    const cap = 2100;
+    const stride = 2048;
+    const count = [_]i32{ 0, 1, 7, 31, 32, 33, 63, 64, 65, 97, 300, 2000, 2048, 650 };
+    const sparse = [_]i32{ 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0 };
+    const rows = count.len;
+    const keys = try gpa.alloc(u16, kvh * cap * dims * 2);
+    defer gpa.free(keys);
+    for (keys) |*x| x.* = rig.bf16Bits(rng.unit() * 2.0);
+    const hq = try gpa.alloc(f32, rows * heads * dims);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = rng.unit() * 4.0;
+    const ids = try gpa.alloc(i32, rows * stride);
+    defer gpa.free(ids);
+    for (0..rows) |r| for (0..stride) |j| {
+        ids[r * stride + j] = @intCast((j * 37 + r * 11 + (j * j) % 13) % cap);
+    };
+    var dk = try t.upload(keys[0 .. kvh * cap * dims]);
+    defer dk.free();
+    var dv = try t.upload(keys[kvh * cap * dims ..]);
+    defer dv.free();
+    var dq = try t.upload(hq);
+    defer dq.free();
+    var di = try t.upload(ids);
+    defer di.free();
+    var dc = try t.upload(&count);
+    defer dc.free();
+    var ds = try t.upload(&sparse);
+    defer ds.free();
+    const zeros = try gpa.alloc(i32, rows * kvh);
+    defer gpa.free(zeros);
+    @memset(zeros, 0);
+    var done = try t.upload(zeros);
+    defer done.free();
+    var po = try t.alloc(rows * heads * parts * dims * 4);
+    defer po.free();
+    var pm = try t.alloc(rows * heads * parts * 2 * 4);
+    defer pm.free();
+    var outs: [3]DeviceBuffer = undefined;
+    for (&outs) |*o| o.* = try t.alloc(rows * heads * dims * 4);
+    defer for (&outs) |*o| o.free();
+    const st = t.stream.handle;
+    const q = ptr(?[*]const f32, dq);
+    const k = ptr(?*const anyopaque, dk);
+    const v = ptr(?*const anyopaque, dv);
+    const id = ptr(?[*]const i32, di);
+    const cn = ptr(?[*]const i32, dc);
+    const sp = ptr(?[*]const i32, ds);
+    const o = ptr(?[*]f32, po);
+    const m = ptr(?[*]f32, pm);
+    const r: c_int = @intCast(rows);
+    const scale: f32 = 1.0 / 16.0;
+    try t.on.fn_sparse_attention_scalar(q, k, v, 2, id, stride, cn, sp, o, m, ptr(?[*]f32, outs[0]), r, s.heads, s.kv_heads, s.dims, cap, scale, s.parts, st);
+    try t.on.fn_sparse_attention(q, k, v, 2, id, stride, cn, sp, o, m, ptr(?[*]f32, outs[1]), r, s.heads, s.kv_heads, s.dims, cap, scale, s.parts, st);
+    try t.on.fn_sparse_attention_merged(q, k, v, 2, id, stride, cn, sp, o, m, ptr(?[*]f32, outs[2]), r, s.heads, s.kv_heads, s.dims, cap, scale, s.parts, rig.at(done), st);
+    try t.stream.synchronize();
+    const want = try rig.download(f32, outs[0]);
+    defer gpa.free(want);
+    var worst: f64 = 0;
+    for (outs[1..]) |b| {
+        const got = try rig.download(f32, b);
+        defer gpa.free(got);
+        // q * scale and p round to BF16 before their products (half a unit each): within 2^-5 of values up to 2
+        for (want, got, 0..) |x, y, i| {
+            const d = @abs(@as(f64, x) - y);
+            try rig.expect(d <= 0x1p-5, "sparse=wmma heads {d}/{d} parts {d}: value {d}: scalar {d} wmma {d}", .{ s.heads, s.kv_heads, s.parts, i, x, y });
+            worst = @max(worst, d);
+        }
+    }
+    // the merged launch leaves `done` zero for the next layer
+    const left = try rig.download(i32, done);
+    defer gpa.free(left);
+    for (left) |x| try rig.expect(x == 0, "sparse=wmma: done left {d}", .{x});
+    return worst;
 }

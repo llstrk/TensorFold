@@ -5,6 +5,9 @@ const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
 const std = @import("std");
 const kernels = @import("../kernels.zig");
+const caps = @import("../caps.zig");
+/// Whether this build's code object has gfx11's matrix cores (the WMMA sparse tile compiles to nothing elsewhere).
+const wmma11 = if (caps.Caps.of(kernels.arch)) |c| c.matrix == .wmma11 else false;
 const util = @import("util.zig");
 const S = util.S;
 const P = util.P;
@@ -38,6 +41,9 @@ pub const Fns = struct {
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
     sparse_lanes: [2][2]Function, // the same sums from fp16 and bf16 caches, a lane a key and several heads
     sparse_merge: Function,
+    idx_scores_wmma: Function, // the indexer's scores on gfx11's matrix cores (policy sparse=wmma)
+    sparse_wmma: Function, // gfx11's matrix cores over a BF16 cache with 256-dim heads (policy sparse=wmma)
+    sparse_wmma_merge: Function, // ...with the merge by each (kv head, row)'s last part: no merge launch
 
     pub fn load(m: Module) Error!Fns {
         return .{
@@ -61,6 +67,9 @@ pub const Fns = struct {
                 .{ try m.function("tf_fn_sparse_lanes12_f16"), try m.function("tf_fn_sparse_lanes12_bf16") },
             },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
+            .sparse_wmma = try m.function("tf_fn_sparse_wmma_bf16"),
+            .sparse_wmma_merge = try m.function("tf_fn_sparse_wmma_merge_bf16"),
+            .idx_scores_wmma = try m.function("tf_fn_idx_scores_wmma"),
         };
     }
 };
@@ -378,6 +387,11 @@ pub fn idxScores(
 ) Error!void {
     if (blocks == 0) return;
     if (dims > threads) return util.invalid("idxScores");
+    if (wmma11 and l.sparse_wmma and kind == 2 and dims == 128 and heads <= 8 and rows >= 16) {
+        var w: Args = .{};
+        inline for (.{ ad(q), ad(pooled), ad(complete), ad(scores), rows, heads, blocks, stride, top }) |v| try w.add(v);
+        return l.go(l.fnx.idx_scores_wmma, dim(cdiv(blocks, 256), cdiv(rows, 16), 1), dim(128, 1, 1), 0, s, &w);
+    }
     var a: Args = .{};
     inline for (.{
         ad(q),
