@@ -133,6 +133,29 @@ pub fn tf_moe_combine_gate(l: *const Launcher, y: CF, wts: CF, shared: CF, out: 
     try l.go(l.moe_combine_gate, dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
 }
 
+/// The span blocks tf_moe_route_wide takes for `pairs` (512 pairs a span); 0 where tf_moe_route is the faster.
+pub fn routeWideSpans(pairs: usize, experts: usize) usize {
+    if (pairs < 4096 or experts > 1024) return 0;
+    return @min(1024, cdiv(pairs, 512));
+}
+
+/// tf_moe_route's members and items in three launches over `spans` blocks; `scratch` holds (spans + 1) * experts ints.
+pub fn tf_moe_route_wide(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, spans: c_int, scratch: I, s: S) Error!void {
+    if (experts > 1024 or spans < 1) return invalid("moe_route_wide");
+    const span: c_int = @intCast(cdiv(@as(usize, @intCast(pairs)), @as(usize, @intCast(spans))));
+    const firsts = ad(scratch);
+    const totals = firsts + @as(u64, @intCast(spans)) * @as(u64, @intCast(experts)) * 4;
+    var a: Args = .{};
+    inline for (.{ ad(picks), pairs, experts, span, firsts }) |x| try a.add(x);
+    try l.go(l.op.moe_route_wide[0], dim(@as(u32, @intCast(spans)), 1, 1), dim(32, 1, 1), 0, s, &a);
+    var b: Args = .{};
+    inline for (.{ firsts, spans, experts, totals }) |x| try b.add(x);
+    try l.go(l.op.moe_route_wide[1], dim(@as(u32, @intCast(cdiv(@as(usize, @intCast(experts)), 8))), 1, 1), dim(256, 1, 1), 0, s, &b);
+    var c: Args = .{};
+    inline for (.{ ad(picks), pairs, experts, tile, span, firsts, totals, ad(members), ad(items), capacity }) |x| try c.add(x);
+    try l.go(l.op.moe_route_wide[2], dim(@as(u32, @intCast(spans)), 1, 1), dim(32, 1, 1), 0, s, &c);
+}
+
 pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(picks));

@@ -160,6 +160,7 @@ pub const Launcher = struct {
         gdn_gate_prefill: Function,
         dense_rows: Function,
         moe_route: Function,
+        moe_route_wide: [3]Function, // count, spans, place
         router_rows: [2]Function, // fp16, bf16
         router_tile: [2]Function,
         router_small: [2]Function,
@@ -247,6 +248,7 @@ pub const Launcher = struct {
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
             .dense_rows = try ops.function("tf_dense_rows"),
             .moe_route = try ops.function("tf_moe_route"),
+            .moe_route_wide = .{ try ops.function("tf_moe_route_count"), try ops.function("tf_moe_route_spans"), try ops.function("tf_moe_route_place") },
             .router_rows = .{ try ops.function("tf_router_rows_f16"), try ops.function("tf_router_rows_bf16") },
             .router_tile = .{ try ops.function("tf_router_tile_f16"), try ops.function("tf_router_tile_bf16") },
             .router_small = .{ try ops.function("tf_router_small_f16"), try ops.function("tf_router_small_bf16") },
@@ -357,6 +359,7 @@ pub const Launcher = struct {
     pub const tf_moe_combine = moe.tf_moe_combine;
     pub const tf_moe_combine_gate = moe.tf_moe_combine_gate;
     pub const tf_moe_route = moe.tf_moe_route;
+    pub const tf_moe_route_wide = moe.tf_moe_route_wide;
     pub const tf_causal = attention.tf_causal;
     pub const tf_attn_gate = attention.tf_attn_gate;
     pub const tf_heads_rows = attention.tf_heads_rows;
