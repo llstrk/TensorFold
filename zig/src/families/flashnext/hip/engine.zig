@@ -9,6 +9,7 @@ const loader = @import("load.zig");
 const tables = @import("tables.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
+const head_mod = @import("head.zig");
 const mixers = @import("mixers.zig");
 const index = @import("../index.zig");
 
@@ -285,8 +286,18 @@ pub const Engine = struct {
             false,
             try forward.stage(&e.weights.model, &e.host, &segs, false),
         );
-        _ = try e.logits(o, out.mixed, e.o.chunk);
-        return counting.used + (16 << 20);
+        // the MTP head's forward over the chunk's rows, which a prompt chunk runs past its own forward
+        if (e.weights.model.mtp) |*h| {
+            var hc = try head_mod.caches(e.gpa, &e.driver, h, @max(e.o.capacity, e.o.chunk) + cache.max_window, e.act, e.eos);
+            defer hc.deinit(e.gpa);
+            const ones: hip.DeviceBuffer = .{ .r = &e.driver, .ptr = null, .len = std.math.maxInt(usize) };
+            const at = counting.mark();
+            _ = try head_mod.run(o, true, &e.weights.model, &e.host, &hc, out.streams, tokens, e.o.capacity -| e.o.chunk, ones);
+            counting.release(at);
+        }
+        // the output head over the most rows a call takes it for: a window round's (a prompt chunk's is its last row)
+        _ = try e.logits(o, out.mixed, @min(e.o.chunk, forward.max_segs * cache.max_window));
+        return counting.peak + (16 << 20);
     }
 
     /// The output head over `rows` final rows: whole logits rows (act dtype), joined across ranks in rank order.
