@@ -21,6 +21,8 @@ const cdiv = util.cdiv;
 
 pub const Fns = struct {
     hc_norm: Function,
+    /// tf_fn_hc_norm's bits on bf16 at one rank, 256 threads and 8-byte accesses.
+    hc_norm_v4: Function,
     hc_gates: Function,
     rms_wide: Function,
     rms_wide_waves: Function,
@@ -39,6 +41,7 @@ pub const Fns = struct {
     pub fn load(m: Module) Error!Fns {
         return .{
             .hc_norm = try m.function("tf_fn_hc_norm"),
+            .hc_norm_v4 = try m.function("tf_fn_hc_norm_v4"),
             .hc_gates = try m.function("tf_fn_hc_gates"),
             .rms_wide = try m.function("tf_fn_rms_wide"),
             .rms_wide_waves = try m.function("tf_fn_rms_wide_waves"),
@@ -117,6 +120,8 @@ pub fn hcNormShares(
         world,
         stride,
     }) |v| try a.add(v);
+    const aligned = (ad(h) | ad(branch) | ad(h_out) | ad(x_out)) % 8 == 0 and ad(scale) % 16 == 0;
+    if (kind == 2 and world == 0 and @rem(dims, 4) == 0 and aligned) return l.go(l.fnx.hc_norm_v4, dim(streams, rows, 1), dim(256, 1, 1), 0, s, &a);
     try l.go(l.fnx.hc_norm, dim(streams, rows, 1), dim(1024, 1, 1), 0, s, &a);
 }
 
