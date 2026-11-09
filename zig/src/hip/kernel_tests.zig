@@ -43,6 +43,7 @@ test {
     _ = @import("kernel_tests/affine/golden.zig");
     _ = @import("kernel_tests/graph_split.zig");
     _ = @import("kernel_tests/flashnext.zig");
+    _ = @import("kernel_tests/flashnext_hc.zig");
     _ = @import("kernel_tests/flashnext_attn.zig");
     _ = @import("kernel_tests/moe_gate.zig");
     _ = @import("kernel_tests/flashnext_sparse.zig");

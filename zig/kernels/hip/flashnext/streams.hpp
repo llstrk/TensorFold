@@ -69,6 +69,79 @@ tf_fn_hc_norm(const void* h, const void* branch, const void* inject, void* h_out
     }
 }
 
+// tf_fn_hc_norm's bits on bf16 (one rank) with 256 threads and 8-byte accesses: thread u stands for tf_fn_hc_norm's
+// threads 4u..4u+3 (four neighbouring dims of each 1024-wide pass), keeps their four sums apart, and runs their xor
+// tree (masks 16, 8, 4 as lane xors 4, 2, 1; masks 2 and 1 among its own four), then the 32 waves' sums in order.
+extern "C" __global__ void __launch_bounds__(256)
+tf_fn_hc_norm_v4(const void* h, const void* branch, const void* inject, void* h_out, void* x_out, const float* scale,
+                 int kind, int streams, int dims, float eps, int world, long long stride) {
+    (void)kind; (void)world; (void)stride;
+    __shared__ float scratch[kNormThreads / 32];
+    const int s = blockIdx.x, r = blockIdx.y, u = threadIdx.x;
+    const long long base = (static_cast<long long>(r) * streams + s) * dims;
+    const uint16_t* h16 = static_cast<const uint16_t*>(h);
+    const uint16_t* b16 = static_cast<const uint16_t*>(branch);
+    float v[kNormPer][4];
+    float part[4] = {0.f, 0.f, 0.f, 0.f};
+    const float inj = branch != nullptr ? bf16_to_float(static_cast<const uint16_t*>(inject)[static_cast<long long>(r) * streams + s]) : 0.f;
+#pragma unroll
+    for (int j = 0; j < kNormPer; ++j) {
+        const int d0 = 4 * u + j * kNormThreads;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) v[j][i] = 0.f;
+        if (d0 >= dims) continue;
+        const uint2 hv = *reinterpret_cast<const uint2*>(h16 + base + d0);
+        float x[4] = {bf16_to_float(hv.x & 0xffff), bf16_to_float(hv.x >> 16), bf16_to_float(hv.y & 0xffff), bf16_to_float(hv.y >> 16)};
+        if (branch != nullptr) {
+            const uint2 bv = *reinterpret_cast<const uint2*>(b16 + static_cast<long long>(r) * dims + d0);
+            const float b[4] = {bf16_to_float(bv.x & 0xffff), bf16_to_float(bv.x >> 16), bf16_to_float(bv.y & 0xffff), bf16_to_float(bv.y >> 16)};
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float add = rounded(b[i] * inj, 2);
+                x[i] = rounded(x[i] + add, 2);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            v[j][i] = x[i];
+            part[i] += x[i] * x[i];
+        }
+    }
+#pragma unroll
+    for (int m = 16; m >= 4; m >>= 1) {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) part[i] += __shfl_xor(part[i], m >> 2, 32);
+    }
+    {
+        const float p0 = part[0] + part[2], p1 = part[1] + part[3], p2 = part[2] + part[0], p3 = part[3] + part[1];
+        part[0] = p0 + p1;
+        part[1] = p1 + p0;
+        part[2] = p2 + p3;
+        part[3] = p3 + p2;
+    }
+    if ((u & 7) == 0) scratch[u >> 3] = part[0];
+    __syncthreads();
+    float total = 0.f;
+    for (int w = 0; w < kNormThreads / 32; ++w) total += scratch[w];
+    const float rinv = rsqrtf(total / static_cast<float>(dims) + eps);
+#pragma unroll
+    for (int j = 0; j < kNormPer; ++j) {
+        const int d0 = 4 * u + j * kNormThreads;
+        if (d0 >= dims) continue;
+        if (h_out != nullptr) {
+            uint2 o;
+            o.x = static_cast<uint32_t>(float_to_bf16(v[j][0])) | static_cast<uint32_t>(float_to_bf16(v[j][1])) << 16;
+            o.y = static_cast<uint32_t>(float_to_bf16(v[j][2])) | static_cast<uint32_t>(float_to_bf16(v[j][3])) << 16;
+            *reinterpret_cast<uint2*>(static_cast<uint16_t*>(h_out) + base + d0) = o;
+        }
+        const float4 sc = *reinterpret_cast<const float4*>(scale + static_cast<long long>(s) * dims + d0);
+        uint2 o;
+        o.x = static_cast<uint32_t>(float_to_bf16((v[j][0] * rinv) * sc.x)) | static_cast<uint32_t>(float_to_bf16((v[j][1] * rinv) * sc.y)) << 16;
+        o.y = static_cast<uint32_t>(float_to_bf16((v[j][2] * rinv) * sc.z)) | static_cast<uint32_t>(float_to_bf16((v[j][3] * rinv) * sc.w)) << 16;
+        *reinterpret_cast<uint2*>(static_cast<uint16_t*>(x_out) + base + d0) = o;
+    }
+}
+
 // From z [rows, low (+ streams with inject)] / streams: silu for the up projection, 2 sigmoid for the inject gates.
 extern "C" __global__ void tf_fn_hc_gates(const float* z, void* act, void* inject, int kind, int rows, int low,
                                           int streams) {
