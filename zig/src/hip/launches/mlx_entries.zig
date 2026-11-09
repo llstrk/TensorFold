@@ -188,9 +188,11 @@ fn fitsPrefillMatrix(s: Shape) bool {
 
 /// Prompt chunks of at most this many rows: past it an expert holds enough rows that the 128-row tile wins.
 const item_rows = 1024;
+/// A routed launch's m is its plan's tile rows, so its chunk is bounded by pairs: Flash Next's 11 a row.
+const item_pairs = item_rows * 11;
 
 fn fitsPrefillItem(s: Shape) bool {
-    return fitsPrefillMatrix(s) and s.m <= item_rows;
+    return fitsPrefillMatrix(s) and s.m <= item_rows and s.plan_pairs <= item_pairs;
 }
 
 fn fitsPrefillGemm(s: Shape) bool {
@@ -483,12 +485,12 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
 test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows, the 128-row tile past them" {
     const r = kernelsOn("gfx1151");
     const env = envOn("gfx1151", true, true, true);
-    // Flash Next's gate and up: 11 slots a row, the plan's item capacity as the launch passes it
-    for ([_]struct { u32, []const u8 }{ .{ 1024, "item64" }, .{ 1025, "matrix" }, .{ 4096, "matrix" } }) |w| {
+    // Flash Next's gate and up: 11 slots a row, m the plan's tile rows and the item capacity as the launch passes them
+    for ([_]struct { u32, []const u8 }{ .{ 64, "item64" }, .{ 1024, "item64" }, .{ 1025, "matrix" }, .{ 4096, "matrix" } }) |w| {
         const pairs = w[0] * 11;
         const items = @min(pairs, 512) + pairs / 8;
         const shape: Shape = .{
-            .m = w[0],
+            .m = @min(w[0], 128),
             .n = 1280,
             .k = 2560,
             .bits = 4,
