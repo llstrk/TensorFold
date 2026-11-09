@@ -136,6 +136,7 @@ pub const Launcher = struct {
         rms2: Function,
         gnorm_out: Function,
         select: Function,
+        select_rows: [2]Function, // up to 512 experts, up to 1,024
     };
 
     const Ops = struct {
@@ -199,7 +200,7 @@ pub const Launcher = struct {
         l.fuse = choices.fuse;
         l.wide = choices.wide;
         l.edge = edge_pass;
-        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
+        l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = .{ try dec.function("tf_select_rows16"), try dec.function("tf_select_rows32") } };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),

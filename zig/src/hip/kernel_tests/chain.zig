@@ -25,8 +25,17 @@ fn select(t: *Rig, rng: *rig.Rng, rows: usize, experts: usize, top_k: usize) !vo
     const logits = try gpa.alloc(f32, rows * (experts + 1));
     defer gpa.free(logits);
     for (logits) |*v| v.* = rng.unit() * 4.0;
-    // equal logits: the lower index wins
-    for (0..rows) |r| logits[r * (experts + 1) + 5] = logits[r * (experts + 1) + 9];
+    // equal logits: the lower index wins; -0 ties +0; infinities order as values
+    for (0..rows) |r| {
+        const l = logits[r * (experts + 1) ..][0 .. experts + 1];
+        l[5] = l[9];
+        if (r % 2 == 1) {
+            l[2] = -0.0;
+            l[3] = 0.0;
+            l[4] = std.math.inf(f32);
+            l[experts - 1] = -std.math.inf(f32);
+        }
+    }
     var dev_logits = try t.upload(logits);
     defer dev_logits.free();
     var picks: [2]DeviceBuffer = undefined;
@@ -234,6 +243,10 @@ test "the merged MoE pick writes the scanning kernel's picks, weights, items and
     var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
     for ([_]usize{ 1, 4, 16 }) |rows| try select(t, &rng, rows, 256, 8);
     try select(t, &rng, 1, 128, 6);
+    // prompt rows a wave a row: a partial last block, both register widths, and the widest pick
+    try select(t, &rng, 37, 512, 10);
+    try select(t, &rng, 9, 1024, 31);
+    try select(t, &rng, 5, 33, 1);
 }
 
 test "the merged conv split writes the chain's state, snapshots, q, k, v, gate and beta" {
