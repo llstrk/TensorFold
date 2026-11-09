@@ -1,6 +1,7 @@
 // Gated DeltaNet: a wave per (batch, value head, value row) walks the sequence, lane sums as the Python reference.
 
 #include "decode/plan.hpp"
+#include "recurrence/gated_delta_chunk.hpp"
 
 #include <hip/hip_runtime.h>
 
