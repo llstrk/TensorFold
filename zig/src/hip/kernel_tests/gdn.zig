@@ -140,9 +140,9 @@ fn run(
     );
 }
 
-test "the DeltaNet stays within 5e-3 of the float64 recurrence at four lengths" {
-    const t = try Rig.open(1 << 30);
-    defer t.close();
+/// The largest relative error of the rows and state against the float64 recurrence at four lengths.
+fn againstFloat64(t: *Rig) !f64 {
+    var worst: f64 = 0;
     for ([_]Shape{
         .{ .length = 64, .key_heads = 2, .value_heads = 4 },
         .{ .length = 200, .key_heads = 2, .value_heads = 4 },
@@ -176,9 +176,28 @@ test "the DeltaNet stays within 5e-3 of the float64 recurrence at four lengths" 
         defer gpa.free(gy);
         const gs = try rig.download(f32, state);
         defer gpa.free(gs);
-        try std.testing.expect(relative(gy, ry) < 5e-3);
-        try std.testing.expect(relative(gs, rs) < 5e-3);
+        worst = @max(worst, relative(gy, ry), relative(gs, rs));
     }
+    return worst;
+}
+
+test "the DeltaNet stays within 5e-3 of the float64 recurrence at four lengths" {
+    const t = try Rig.open(1 << 30);
+    defer t.close();
+    try std.testing.expect(try againstFloat64(t) < 5e-3);
+}
+
+test "delta=chunk: the chunked scan on FP16 operands stays within the scan's 5e-3 of float64 at four lengths" {
+    const t = try Rig.open(1 << 30);
+    defer t.close();
+    const caps = @import("../caps.zig").Caps.of(@import("../kernels.zig").arch) orelse return error.SkipZigTest;
+    if (caps.matrix != .wmma11) return error.SkipZigTest;
+    const scan = try againstFloat64(t);
+    t.on.delta_chunk = true;
+    defer t.on.delta_chunk = false;
+    const chunked = try againstFloat64(t);
+    std.debug.print("DELTA_CHUNK worst relative error vs float64: chunked {e:.3}, scan {e:.3}\n", .{ chunked, scan });
+    try std.testing.expect(chunked < 5e-3);
 }
 
 test "a prompt cut on either side of 64 rows gives the same rows and state as one call" {

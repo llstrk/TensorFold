@@ -96,6 +96,9 @@ pub const Launcher = struct {
     wide: bool,
     /// Flash Next's sparse prompt attention on the BF16 matrix-core tile (policy sparse=wmma).
     sparse_wmma: bool = false,
+    /// The prompt scan in chunks of 32 on WMMA (policy delta=chunk): dk = dv = 128, no snapshots.
+    gdn_chunk: [2]Function, // prep, walk
+    delta_chunk: bool = false,
     /// The edge pass runs after the prompt tile (`edge_pass`; tests turn it off to see the tile alone).
     edge: bool,
     /// The MLX affine products and the registry that picks their tiles.
@@ -181,7 +184,7 @@ pub const Launcher = struct {
     pub const edge_pass = if (caps.Caps.of(kernels.arch)) |c| !c.dot2_signed_zero else true;
 
     /// Which kernels a run takes where two give the same bits; every one defaults on.
-    pub const Choices = struct { fuse: bool = true, wide: bool = true, sparse_wmma: bool = false, products: affine.Choices = .{} };
+    pub const Choices = struct { fuse: bool = true, wide: bool = true, sparse_wmma: bool = false, delta_chunk: bool = false, products: affine.Choices = .{} };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
     pub fn load(r: *const runtime.Runtime, choices: Choices, images: [kernels.group_count][]align(8) const u8) Error!Launcher {
@@ -203,6 +206,7 @@ pub const Launcher = struct {
         l.fuse = choices.fuse;
         l.wide = choices.wide;
         l.sparse_wmma = choices.sparse_wmma;
+        l.delta_chunk = choices.delta_chunk;
         l.edge = edge_pass;
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = .{ try dec.function("tf_select_rows16"), try dec.function("tf_select_rows32") } };
         l.plan = .{
@@ -295,6 +299,7 @@ pub const Launcher = struct {
             try act.function(ns ++ "15gdn_gate_kernelI6__halfEEvPKT_S5_PKfS7_PfS8_ii"),
             try act.function(ns ++ "15gdn_gate_kernelI12hip_bfloat16EEvPKT_S5_PKfS7_PfS8_ii"),
         };
+        l.gdn_chunk = .{ try gd.function("tf_gdn_chunk_prep"), try gd.function("tf_gdn_chunk_walk") };
         l.gated_delta_tile = .{
             try gd.function(ns ++ "16gated_delta_tileILi128ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
             try gd.function(ns ++ "16gated_delta_tileILi16ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
@@ -381,6 +386,7 @@ pub const Launcher = struct {
     pub const pagedCausal = attention.pagedCausal;
     pub const tf_gdn_gate = recurrence.tf_gdn_gate;
     pub const tf_gated_delta = recurrence.tf_gated_delta;
+    pub const tf_gdn_chunked = recurrence.tf_gdn_chunked;
     pub const planKvWrite = plan.planKvWrite;
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;

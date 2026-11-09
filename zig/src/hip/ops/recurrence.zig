@@ -54,5 +54,10 @@ pub fn gdnGate(o: Ops, a: Tensor, b: Tensor, a_log: u64, dt_bias: u64, gate: u64
 
 /// The DeltaNet recurrence in fp32, state in place, the same walk at every length.
 pub fn gatedDelta(o: Ops, q: u64, k: u64, v: u64, gate: u64, beta: u64, state: u64, y: u64, length: usize, key_heads: usize, value_heads: usize, dk: usize, dv: usize, states: ?u64) Error!void {
+    const rec = @import("../launches/recurrence.zig");
+    if (rec.chunkedTakes(o.l, length, dk, dv, states != null)) {
+        const scratch = try o.arena.take(rec.chunkedScratch(length, value_heads));
+        return o.l.tf_gdn_chunked(f(q), f(k), f(v), f(gate), f(beta), f(state), f(y), int(length), int(key_heads), int(value_heads), scratch, o.stream);
+    }
     try o.l.tf_gated_delta(f(q), f(k), f(v), f(gate), f(beta), f(state), f(y), 1, int(length), int(key_heads), int(value_heads), int(dk), int(dv), o.stream, if (states) |s| f(s) else null);
 }
