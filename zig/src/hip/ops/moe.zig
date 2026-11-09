@@ -1,6 +1,7 @@
 //! The mixture-of-experts launches: the router, the pick, the plan, the activation and the combine.
 
 const t = @import("types.zig");
+const launches_moe = @import("../launches/moe.zig");
 const Ops = @import("ops.zig").Ops;
 const Error = t.Error;
 const Tensor = t.Tensor;
@@ -39,6 +40,11 @@ pub fn moeSelect(o: Ops, logits: u64, pick: u64, wts: u64, plan: ?struct { items
 }
 
 pub fn moeRoute(o: Ops, picks: u64, pairs: usize, experts: usize, tile: usize, members: u64, items: u64, capacity: usize) Error!void {
+    const spans = launches_moe.routeWideSpans(pairs, experts);
+    if (spans > 0) {
+        const scratch = try o.arena.of(i32, spans * experts + experts);
+        return o.l.tf_moe_route_wide(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), int(spans), i(scratch), o.stream);
+    }
     try o.l.tf_moe_route(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), o.stream);
 }
 

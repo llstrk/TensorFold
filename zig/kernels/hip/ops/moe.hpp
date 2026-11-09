@@ -86,6 +86,111 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
     }
 }
 
+// tf_moe_route's members and items (the same values) over many blocks, for a prompt's many pairs: (1) a one-wave
+// block a span of `span` pairs counts its experts, (2) a wave an expert turns the spans' counts into each span's first
+// place for it (its exclusive sum, in place) and the expert's total, (3) each span block places its pairs in order: a
+// wave of 32 pairs at a time, a pair's place its span's next place for its expert plus the earlier lanes' picks of it
+// (lanes of one expert found by a ballot a bit of the expert's id). The spans' block also cut the items.
+extern "C" __global__ void __launch_bounds__(32) tf_moe_route_count(const int* picks, int pairs, int experts, int span,
+                                                                   int* span_counts) {
+    __shared__ int counts[1024];
+    const int g = blockIdx.x, lane = threadIdx.x;
+    for (int e = lane; e < experts; e += 32) counts[e] = 0;
+    __builtin_amdgcn_wave_barrier();
+    const int lo = g * span, hi = min(pairs, lo + span);
+    for (int p = lo + lane; p < hi; p += 32) atomicAdd(&counts[picks[p]], 1);
+    __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+    __builtin_amdgcn_wave_barrier();
+    for (int e = lane; e < experts; e += 32) span_counts[static_cast<long long>(g) * experts + e] = counts[e];
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_moe_route_spans(int* span_counts, int spans, int experts, int* totals) {
+    const int e = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (e >= experts) return;
+    int run = 0;
+    for (int g0 = 0; g0 < spans; g0 += 32) {
+        const int g = g0 + lane;
+        const int c = g < spans ? span_counts[static_cast<long long>(g) * experts + e] : 0;
+        int s = c;
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            const int u = __shfl_up(s, o, 32);
+            if (lane >= o) s += u;
+        }
+        if (g < spans) span_counts[static_cast<long long>(g) * experts + e] = run + s - c;
+        run += __shfl(s, 31, 32);
+    }
+    if (lane == 0) totals[e] = run;
+}
+
+extern "C" __global__ void __launch_bounds__(32) tf_moe_route_place(const int* picks, int pairs, int experts, int tile,
+                                                                   int span, const int* span_firsts, const int* totals,
+                                                                   int* members, int* items, int capacity) {
+    __shared__ int next[1024];
+    __shared__ int ends[1024];
+    __shared__ int starts[1024];
+    const int g = blockIdx.x, lane = threadIdx.x;
+    // the experts' starts (the totals' exclusive sums) and their items' inclusive sums, 32 experts a step
+    int start = 0, end = 0;
+    for (int e0 = 0; e0 < experts; e0 += 32) {
+        const int e = e0 + lane;
+        const int c = e < experts ? totals[e] : 0, n = (c + tile - 1) / tile;
+        int sc = c, sn = n;
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            const int uc = __shfl_up(sc, o, 32), un = __shfl_up(sn, o, 32);
+            if (lane >= o) { sc += uc; sn += un; }
+        }
+        if (e < experts) {
+            starts[e] = start + sc - c;
+            next[e] = start + sc - c + span_firsts[static_cast<long long>(g) * experts + e];
+            ends[e] = end + sn;
+        }
+        start += __shfl(sc, 31, 32);
+        end += __shfl(sn, 31, 32);
+    }
+    __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+    __builtin_amdgcn_wave_barrier();
+    const int lo = g * span, hi = min(pairs, lo + span);
+    const unsigned below = (1u << lane) - 1u;
+    for (int p0 = lo; p0 < hi; p0 += 32) {
+        const int p = p0 + lane;
+        const bool live = p < hi;
+        const int e = live ? picks[p] : 0;
+        unsigned peers = static_cast<unsigned>(__ballot(live));
+#pragma unroll
+        for (int b = 0; b < 10; ++b) {
+            const unsigned set = static_cast<unsigned>(__ballot((e >> b) & 1));
+            peers &= (e >> b) & 1 ? set : ~set;
+        }
+        const int at = live ? next[e] : 0;
+        __builtin_amdgcn_wave_barrier();
+        if (live) {
+            members[at + __popc(peers & below)] = p;
+            if ((peers & below) == 0) next[e] = at + __popc(peers);  // the expert's first lane
+        }
+        __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "wavefront");
+        __builtin_amdgcn_wave_barrier();
+    }
+    // items: tf_moe_route's slot loop over the blocks
+    for (int slot = g * 32 + lane; slot < capacity; slot += gridDim.x * 32) {
+        int l = 0, h = experts;
+        while (l < h) {
+            const int mid = (l + h) / 2;
+            if (ends[mid] <= slot) l = mid + 1;
+            else h = mid;
+        }
+        const int e = l < experts - 1 ? l : experts - 1;
+        const int c = totals[e];
+        const int reps = (c + tile - 1) / tile;
+        const int within = slot - (ends[e] - reps);
+        const int count = c - within * tile;
+        items[slot * 3] = e;
+        items[slot * 3 + 1] = starts[e] + within * tile;
+        items[slot * 3 + 2] = count < 0 ? 0 : (count > tile ? tile : count);
+    }
+}
+
 // moe_router_kernel's logits with a wave's expert row read once for 8 token rows; each logit keeps its bits.
 __device__ __forceinline__ float router_sum(float x) {
 #pragma unroll

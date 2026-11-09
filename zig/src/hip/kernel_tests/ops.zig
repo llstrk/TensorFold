@@ -219,6 +219,11 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile"
         .{ 64, 1000, 64 },
         .{ 513, 11, 8 },
         .{ 513, 2816, 8 },
+        // from 4,096 pairs the route runs over many blocks: a partial last span, every expert, and the most it takes
+        .{ 512, 4097, 128 },
+        .{ 512, 11 * 2048, 128 },
+        .{ 1024, 9000, 16 },
+        .{ 7, 600 * 1024 + 5, 128 },
     }) |shape| {
         const experts = shape[0];
         const pairs = shape[1];
