@@ -500,6 +500,7 @@ pub const Fx = struct {
             const start = lane.caches.len - follow.len;
             try e.stream.synchronize();
             e.host.used = 0;
+            e.stage_from = 0;
             e.arena.reset();
             const o = e.ops(&e.arena);
             var out = try head_mod.run(

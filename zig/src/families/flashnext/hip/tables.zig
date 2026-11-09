@@ -11,9 +11,11 @@ pub const Shard = struct { words: []const u8, scales: []const u8, biases: []cons
 /// A gather copies the checkpoint's rows in id order: a staging too small, or a row past the last shard.
 const Error = error{ StagingTooSmall, NgramRowOutOfRange };
 
-/// Threads a gather takes at most, and rows a thread takes at least before the gather spreads.
-const max_workers = 8;
-const rows_per_worker = 256;
+/// A gather's most threads (`idle_workers` while the GPU waits on it) and least rows a thread before it spreads.
+pub const default_workers = 8;
+pub const idle_workers = 32;
+const max_workers = idle_workers;
+const rows_per_worker = 64;
 
 /// The shards' rows as mapped: what a gather reads, apart from the hasher that names the rows.
 pub const Rows = struct {
@@ -85,11 +87,16 @@ pub const Rows = struct {
 
     /// Each id's packed words, scales and biases copied into the three staging slices, in id order.
     pub fn gather(r: *const Rows, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
+        return r.gatherWith(ids, words, scales, biases, default_workers);
+    }
+
+    /// `gather` on at most `readers` threads.
+    pub fn gatherWith(r: *const Rows, ids: []const u32, words: []u8, scales: []u8, biases: []u8, readers: usize) !void {
         const wb = r.wordBytes();
         const tb = r.tableBytes();
         if (words.len < ids.len * wb or scales.len < ids.len * tb or biases.len < ids.len * tb)
             return error.StagingTooSmall;
-        const workers = @min(max_workers, @max(1, ids.len / rows_per_worker));
+        const workers = @min(@min(max_workers, @max(1, readers)), @max(1, ids.len / rows_per_worker));
         const per = (ids.len + workers - 1) / workers;
         var results: [max_workers]Error!void = @splat({});
         var threads: [max_workers]?std.Thread = @splat(null);
@@ -208,8 +215,8 @@ pub const Tables = struct {
     }
 
     /// Each id's packed words, scales and biases copied into the three staging slices, in id order.
-    pub fn gather(t: *const Tables, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
-        return t.rows.gather(ids, words, scales, biases);
+    pub fn gather(t: *const Tables, ids: []const u32, words: []u8, scales: []u8, biases: []u8, readers: usize) !void {
+        return t.rows.gatherWith(ids, words, scales, biases, readers);
     }
 
     /// Every byte a gather reads at runtime: the pages a checkpoint release must leave mapped.
