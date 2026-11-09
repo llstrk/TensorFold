@@ -403,6 +403,7 @@ pub const Launcher = struct {
     pub const fn_hc_norm_shares = flashnext.hcNormShares;
     pub const fn_hc_gates = flashnext.hcGates;
     pub const fn_hc_mix = flashnext.hcMix;
+    pub const fn_hc_mix16 = flashnext.hcMix16;
     pub const fn_rms_wide = flashnext.rmsWide;
     pub const fn_wide_width = flashnext.wide_width;
     pub const fn_wide_waves = flashnext.wide_waves;

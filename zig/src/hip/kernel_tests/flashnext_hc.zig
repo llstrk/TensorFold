@@ -3,6 +3,7 @@
 const std = @import("std");
 const rig = @import("rig.zig");
 const util = @import("../launches/util.zig");
+const ops = @import("../ops/ops.zig");
 const fx = @import("flashnext.zig");
 const DeviceBuffer = @import("../memory.zig").DeviceBuffer;
 
@@ -63,4 +64,44 @@ test "tf_fn_hc_norm_v4 writes tf_fn_hc_norm's bytes, with and without a branch, 
             }
         }
     }
+}
+
+test "tf_fn_hc_mix16 on gates cast to the activation type writes tf_fn_hc_mix's bytes of the fp32 gates" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    const o = t.ops(&t.on);
+    var rng: rig.Rng = .{ .state = 0x4C16 };
+    const rows = 7;
+    const s = 4;
+    const d = 2560;
+    const n = rows * s * d;
+    const hg = try gpa.alloc(f32, n);
+    defer gpa.free(hg);
+    for (hg) |*v| v.* = rng.unit() * 12.0;
+    // past bf16's range, ties to even, and the non-finite and signed-zero gates
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), -0.0, 0.0, 3.0e38, 1.00390625, 1.01171875 }, 0..) |v, j| hg[j * 997] = v;
+    const hx = try fx.acts(t, &rng, n, 2.0);
+    defer gpa.free(hx);
+    var g = try t.upload(hg);
+    defer g.free();
+    var x = try t.upload(hx);
+    defer x.free();
+    var g16 = try t.alloc(n * 2);
+    defer g16.free();
+    var want = try t.alloc(rows * d * 2);
+    defer want.free();
+    var got = try t.alloc(rows * d * 2);
+    defer got.free();
+    const kind: ops.Kind = if (t.bf16) .bf16 else .f16;
+    try o.cast(.{ .ptr = at(g), .kind = .f32 }, .{ .ptr = at(g16), .kind = kind }, n);
+    const k = t.kind();
+    const st = t.stream.handle;
+    try t.on.fn_hc_mix(@ptrFromInt(at(g)), @ptrFromInt(at(x)), @ptrFromInt(at(want)), k, rows, s, d, st);
+    try t.on.fn_hc_mix16(@ptrFromInt(at(g16)), @ptrFromInt(at(x)), @ptrFromInt(at(got)), k, rows, s, d, st);
+    try t.stream.synchronize();
+    const hw = try rig.download(u16, want);
+    defer gpa.free(hw);
+    const hgot = try rig.download(u16, got);
+    defer gpa.free(hgot);
+    try std.testing.expectEqualSlices(u16, hw, hgot);
 }
