@@ -217,6 +217,22 @@ extern "C" __global__ void tf_fn_hc_mix(const float* g, const void* x, void* mix
     store(mixed, kind, i, total / static_cast<float>(streams));
 }
 
+// tf_fn_hc_mix with g already in the activation type (its projection rounded it as tf_fn_hc_mix would): same bits.
+extern "C" __global__ void tf_fn_hc_mix16(const void* g, const void* x, void* mixed, int kind, int rows, int streams,
+                                          int dims) {
+    const long long i = gid();
+    if (i >= static_cast<long long>(rows) * dims) return;
+    const long long r = i / dims;
+    const int d = static_cast<int>(i % dims);
+    float total = 0.f;
+    for (int s = 0; s < streams; ++s) {
+        const long long at = (r * streams + s) * dims + d;
+        const float gate = rounded(sigmoid(load(g, kind, at)), kind);
+        total += rounded(gate * load(x, kind, at), kind);
+    }
+    store(mixed, kind, i, total / static_cast<float>(streams));
+}
+
 // Block (s, r): gated = sigmoid(signed sqrt(k . q / sqrt(dims))) v, k and q normed; normed is the conv input.
 extern "C" __global__ void __launch_bounds__(kFnThreads)
 tf_fn_ple_gate(const void* kv, const void* h, const float* key_scale, const float* query_scale, const float* conv_scale,

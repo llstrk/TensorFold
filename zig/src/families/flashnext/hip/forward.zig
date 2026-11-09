@@ -72,8 +72,13 @@ pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize
         @intCast(d.streams),
         o.stream,
     );
-    const g = try o.project(act, hc.up, rows, true);
+    // a prompt's affine gates leave their tile rounded, as tf_fn_hc_mix rounds them first: the same bits
+    const g = try o.project(act, hc.up, rows, !(o.prefill and hc.up.handle == .mlx));
     const mixed = try take(o, m.act, rows * d.hidden);
+    if (g.kind != .f32) {
+        try o.l.fn_hc_mix16(@ptrFromInt(g.ptr), @ptrFromInt(x.ptr), @ptrFromInt(mixed.ptr), kind, @intCast(rows), @intCast(d.streams), @intCast(d.hidden), o.stream);
+        return mixed;
+    }
     try o.l.fn_hc_mix(
         @ptrFromInt(g.ptr),
         @ptrFromInt(x.ptr),

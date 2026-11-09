@@ -28,6 +28,7 @@ pub const Fns = struct {
     rms_wide_waves: Function,
     rms_wide_apply: Function,
     hc_mix: Function,
+    hc_mix16: Function,
     ple_gate: Function,
     ple_conv: Function,
     ngram_ids: Function,
@@ -47,6 +48,7 @@ pub const Fns = struct {
             .rms_wide_waves = try m.function("tf_fn_rms_wide_waves"),
             .rms_wide_apply = try m.function("tf_fn_rms_wide_apply"),
             .hc_mix = try m.function("tf_fn_hc_mix"),
+            .hc_mix16 = try m.function("tf_fn_hc_mix16"),
             .ple_gate = try m.function("tf_fn_ple_gate"),
             .ple_conv = try m.function("tf_fn_ple_conv"),
             .ngram_ids = try m.function("tf_fn_ngram_ids"),
@@ -196,6 +198,13 @@ pub fn hcMix(
     var a: Args = .{};
     inline for (.{ ad(g), ad(x), ad(mixed), kind, rows, streams, dims }) |v| try a.add(v);
     try l.flat(l.fnx.hc_mix, @as(i64, rows) * dims, s, &a);
+}
+
+/// `hcMix` with g in the activation type (rounded by its projection as tf_fn_hc_mix rounds it): the same outputs.
+pub fn hcMix16(l: *const Launcher, g: C, x: C, mixed: P, kind: c_int, rows: c_int, streams: c_int, dims: c_int, s: S) Error!void {
+    var a: Args = .{};
+    inline for (.{ ad(g), ad(x), ad(mixed), kind, rows, streams, dims }) |v| try a.add(v);
+    try l.flat(l.fnx.hc_mix16, @as(i64, rows) * dims, s, &a);
 }
 
 /// The n-gram gate of every stream; `normed` is the conv's input rows.
