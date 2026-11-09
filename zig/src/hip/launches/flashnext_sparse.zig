@@ -1,6 +1,10 @@
-//! Flash Next's sparse prompt attention launches: the lane kernels and the scalar reference.
+//! Flash Next's sparse prompt attention launches: the lane kernels, the scalar reference and the gfx11 WMMA tile.
 
 const Launcher = @import("../launches.zig").Launcher;
+const kernels = @import("../kernels.zig");
+const caps = @import("../caps.zig");
+/// Whether this build's code object has gfx11's matrix cores (the WMMA sparse tile compiles to nothing elsewhere).
+const wmma11 = if (caps.Caps.of(kernels.arch)) |c| c.matrix == .wmma11 else false;
 const util = @import("util.zig");
 const S = util.S;
 const C = util.C;
@@ -56,6 +60,57 @@ pub fn sparseAttention(
         cap,
         scale,
         parts,
+        0,
+        s,
+    );
+}
+
+/// sparseAttention with `done` ((rows, kv_heads) i32, zero, left zero): the WMMA path merges in its launch.
+pub fn sparseAttentionMerged(
+    l: *const Launcher,
+    q: CF,
+    k: C,
+    v: C,
+    cache_kind: c_int,
+    ids: CI,
+    id_stride: i64,
+    count: CI,
+    sparse: CI,
+    parts_o: F,
+    parts_ms: F,
+    out: F,
+    rows: c_int,
+    heads: c_int,
+    kv_heads: c_int,
+    dims: c_int,
+    cap: i64,
+    scale: f32,
+    parts: c_int,
+    done: u64,
+    s: S,
+) Error!void {
+    return sparseWith(
+        .auto,
+        l,
+        q,
+        k,
+        v,
+        cache_kind,
+        ids,
+        id_stride,
+        count,
+        sparse,
+        parts_o,
+        parts_ms,
+        out,
+        rows,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        done,
         s,
     );
 }
@@ -104,6 +159,7 @@ pub fn sparseAttentionScalar(
         cap,
         scale,
         parts,
+        0,
         s,
     );
 }
@@ -129,6 +185,7 @@ fn sparseWith(
     cap: i64,
     scale: f32,
     parts: c_int,
+    done: u64,
     s: S,
 ) Error!void {
     if (dims > 256 or @rem(heads, kv_heads) != 0 or @divExact(heads, kv_heads) > 12)
@@ -153,6 +210,21 @@ fn sparseWith(
         parts,
     }) |x| try a.add(x);
     const wide: usize = if (@divExact(heads, kv_heads) <= 6) 0 else 1;
+    // 8 parts of a row's keys (at most 320 a part)
+    const wparts: c_int = @min(parts, 8);
+    if (kernel == .auto and wmma11 and l.sparse_wmma and cache_kind == 2 and dims == 256 and id_stride <= @as(i64, wparts) * 320) {
+        var c: Args = .{};
+        inline for (.{ ad(q), ad(k), ad(v), ad(ids), id_stride, ad(count), ad(sparse), ad(parts_o), ad(parts_ms), heads, kv_heads, dims, cap, scale, wparts }) |x| try c.add(x);
+        if (done != 0) {
+            try c.add(ad(out));
+            try c.add(done);
+            return l.go(l.fnx.sparse_wmma_merge, dim(kv_heads, rows, wparts), dim(128, 1, 1), 0, s, &c);
+        }
+        try l.go(l.fnx.sparse_wmma, dim(kv_heads, rows, wparts), dim(128, 1, 1), 0, s, &c);
+        var b: Args = .{};
+        inline for (.{ ad(parts_o), ad(parts_ms), ad(out), heads, dims, wparts }) |x| try b.add(x);
+        return l.go(l.fnx.sparse_merge, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);
+    }
     if (kernel == .auto and (cache_kind == 1 or cache_kind == 2) and @rem(dims, 8) == 0) {
         var c: Args = .{};
         inline for (.{

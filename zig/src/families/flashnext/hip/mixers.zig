@@ -419,6 +419,9 @@ fn attend(
     const di = d.index_dim;
     const kind = @backingInt(m.act);
     const key_stride = d.index_top * d.index_ratio + d.index_ratio;
+    // the sparse WMMA launches' part counters (each left zero): zeroed once for all the slices
+    const done = try o.arena.of(i32, rows * d.kv_heads);
+    if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemsetAsync(@ptrFromInt(done), 0, rows * d.kv_heads * 4, o.stream));
     var r0: usize = 0;
     while (r0 < rows) : (r0 += slice_rows) {
         const n = @min(slice_rows, rows - r0);
@@ -481,7 +484,7 @@ fn attend(
         const po = try o.arena.of(f32, n * d.heads * parts * hd);
         const pm = try o.arena.of(f32, n * d.heads * parts * 2);
         const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(hd))));
-        try o.l.fn_sparse_attention(
+        try o.l.fn_sparse_attention_merged(
             @ptrFromInt(q32 + r0 * d.heads * hd * 4),
             @ptrFromInt(kv.k),
             @ptrFromInt(kv.v),
@@ -500,6 +503,7 @@ fn attend(
             @intCast(cap),
             scale,
             parts,
+            done + r0 * d.kv_heads * 4,
             o.stream,
         );
     }

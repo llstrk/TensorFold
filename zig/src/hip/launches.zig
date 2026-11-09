@@ -94,6 +94,8 @@ pub const Launcher = struct {
     fuse: bool,
     /// The 64-row prefill attention tile is on.
     wide: bool,
+    /// Flash Next's sparse prompt attention on the BF16 matrix-core tile (policy sparse=wmma).
+    sparse_wmma: bool = false,
     /// The edge pass runs after the prompt tile (`edge_pass`; tests turn it off to see the tile alone).
     edge: bool,
     /// The MLX affine products and the registry that picks their tiles.
@@ -179,7 +181,7 @@ pub const Launcher = struct {
     pub const edge_pass = if (caps.Caps.of(kernels.arch)) |c| !c.dot2_signed_zero else true;
 
     /// Which kernels a run takes where two give the same bits; every one defaults on.
-    pub const Choices = struct { fuse: bool = true, wide: bool = true, products: affine.Choices = .{} };
+    pub const Choices = struct { fuse: bool = true, wide: bool = true, sparse_wmma: bool = false, products: affine.Choices = .{} };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
     pub fn load(r: *const runtime.Runtime, choices: Choices, images: [kernels.group_count][]align(8) const u8) Error!Launcher {
@@ -200,6 +202,7 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
+        l.sparse_wmma = choices.sparse_wmma;
         l.edge = edge_pass;
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = .{ try dec.function("tf_select_rows16"), try dec.function("tf_select_rows32") } };
         l.plan = .{
@@ -416,6 +419,7 @@ pub const Launcher = struct {
     pub const fn_idx_scores = flashnext.idxScores;
     pub const fn_idx_select = flashnext.idxSelect;
     pub const fn_sparse_attention = flashnext_sparse.sparseAttention;
+    pub const fn_sparse_attention_merged = flashnext_sparse.sparseAttentionMerged;
     pub const fn_sparse_attention_scalar = flashnext_sparse.sparseAttentionScalar;
     pub const tf_mamba_conv = mamba.tf_mamba_conv;
     pub const tf_mamba_dt = mamba.tf_mamba_dt;
