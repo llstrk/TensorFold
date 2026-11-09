@@ -65,8 +65,67 @@ pub const Out = struct { mixed: Tensor, streams: Tensor };
 
 /// A hyper-connection's read of the normed streams `x`: the block input, and the inject gates when `inject` is set.
 pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize, inject: ?Tensor) !Tensor {
-    const d = m.dims;
     const z = try o.project(x, hc.down, rows, true);
+    return hcMix(o, m, hc, x, rows, try hcGates(o, m, z, rows, inject));
+}
+
+/// The normed streams hc products read: `x` as written, or with `rinv` set x = bf16((h * rinv) * scale) read in place.
+pub const Xn = struct { h: Tensor, x: Tensor, rinv: u64 = 0 };
+
+/// Whether the hc products read the streams through rinv (Xn): fold=bf16 prompt rows, one rank, bf16, 64-aligned dims.
+pub fn hcFused(o: Ops, m: *const model.Model, rows: usize) bool {
+    const d = m.dims;
+    return o.prefill and m.tp == null and m.act == .bf16 and o.l.affine.copies != null and
+        rows >= hip.launches.fold16_min_rows and d.streams == 4 and d.hidden % 64 == 0;
+}
+
+/// hcNorm into `xn`: with rinv, h updated and the rinv kept, x left unwritten.
+pub fn hcNormX(o: Ops, m: *const model.Model, xn: Xn, branch: ?Tensor, inject: ?Tensor, scale: u64, rows: usize) !void {
+    if (xn.rinv == 0) return hcNorm(o, m, xn.h, branch, inject, xn.x, scale, rows);
+    const d = m.dims;
+    try o.l.fn_hc_norm_rinv(
+        @ptrFromInt(xn.h.ptr),
+        if (branch) |b| @ptrFromInt(b.ptr) else null,
+        if (inject) |i| @ptrFromInt(i.ptr) else null,
+        if (branch != null) @ptrFromInt(xn.h.ptr) else null,
+        @ptrFromInt(xn.rinv),
+        @ptrFromInt(scale),
+        @intCast(rows),
+        @intCast(d.streams),
+        @intCast(d.hidden),
+        d.eps,
+        o.stream,
+    );
+}
+
+/// hcBranch into `xn` (rinv only at one rank, so the branch is the activation type).
+pub fn hcBranchX(o: Ops, m: *const model.Model, xn: Xn, branch: Tensor, inject: Tensor, scale: u64, rows: usize) !void {
+    if (xn.rinv == 0) return hcBranch(o, m, xn.h, branch, inject, xn.x, scale, rows);
+    return hcNormX(o, m, xn, branch, inject, scale, rows);
+}
+
+/// hcPre from `xn`, through rinv where the products take it; otherwise x is written (the same bytes) and hcPre runs.
+pub fn hcPreX(o: Ops, m: *const model.Model, hc: model.Hc, xn: Xn, rows: usize, inject: ?Tensor) !Tensor {
+    if (xn.rinv == 0) return hcPre(o, m, hc, xn.x, rows, inject);
+    const d = m.dims;
+    const z = (try o.projectHcDownNorm(xn.h, xn.rinv, hc.scale, hc.down, rows, d.streams, d.hidden)) orelse {
+        try hcNorm(o, m, xn.h, null, null, xn.x, hc.scale, rows);
+        return hcPre(o, m, hc, xn.x, rows, inject);
+    };
+    const act = try hcGates(o, m, z, rows, inject);
+    {
+        const before = o.arena.mark();
+        const mixed = try take(o, m.act, rows * d.hidden);
+        if (try o.projectHcMixNorm(act, hc.up, rows, xn.h, xn.rinv, hc.scale, mixed, d.hidden)) return mixed;
+        o.arena.release(before);
+    }
+    try hcNorm(o, m, xn.h, null, null, xn.x, hc.scale, rows);
+    return hcMix(o, m, hc, xn.x, rows, act);
+}
+
+/// The hc down projection's fp32 sums `z` as the up projection's input (and the inject gates when `inject` is set).
+fn hcGates(o: Ops, m: *const model.Model, z: Tensor, rows: usize, inject: ?Tensor) !Tensor {
+    const d = m.dims;
     const act = try take(o, m.act, rows * d.low);
     const kind = @backingInt(m.act);
     try o.l.fn_hc_gates(
@@ -79,7 +138,21 @@ pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize
         @intCast(d.streams),
         o.stream,
     );
-    // a prompt's affine gates leave their tile rounded, as tf_fn_hc_mix rounds them first: the same bits
+    return act;
+}
+
+/// The up projection of the gates `act` and its mix with the normed streams `x`.
+fn hcMix(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize, act: Tensor) !Tensor {
+    const d = m.dims;
+    const kind = @backingInt(m.act);
+    // a prompt's up projection and mix in one launch where the fold tile takes it (fold=on): the same bits
+    {
+        const before = o.arena.mark();
+        const mixed = try take(o, m.act, rows * d.hidden);
+        if (try o.projectHcMix(act, hc.up, rows, x, mixed, d.hidden)) return mixed;
+        o.arena.release(before);
+    }
+    // the gates as the activation type when the tile rounds into it: tf_fn_hc_mix rounds them first, so the same bits
     const g = try o.project(act, hc.up, rows, !(o.prefill and hc.up.handle == .mlx));
     const mixed = try take(o, m.act, rows * d.hidden);
     if (g.kind != .f32) {
@@ -385,6 +458,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
     const dev_pos = in.pos;
     const h = try take(o, m.act, rows * d.wide());
     const x = try take(o, m.act, rows * d.wide());
+    const xn: Xn = .{ .h = h, .x = x, .rinv = if (hcFused(o, m, rows)) try o.arena.of(f32, rows * d.streams) else 0 };
     try o.embedRows(m.embed, dev_ids, rows * d.streams, h);
     var cins: [max_segs]u64 = undefined;
     if (segs.len > max_segs) return error.TooManyStreams;
@@ -413,9 +487,9 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
                 off += g.tokens.len;
             }
         }
-        if (i == 0 or i == m.ple.layer) try hcNorm(o, m, h, null, null, x, layer.ahc.scale, rows);
+        if (i == 0 or i == m.ple.layer) try hcNormX(o, m, xn, null, null, layer.ahc.scale, rows);
         const inject = try take(o, m.act, rows * d.streams);
-        const mixed = try hcPre(o, m, layer.ahc, x, rows, inject);
+        const mixed = try hcPreX(o, m, layer.ahc, xn, rows, inject);
         const branch = switch (layer.mixer) {
             .linear => |l| try mixers.linear(o, m, l, segs, i, mixed, rows, window),
             .sparse => |s| try mixers.sparse(
@@ -432,17 +506,17 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
                 .{ .ends = in.ends, .complete = in.complete, .bound = in.bound },
             ),
         };
-        try hcBranch(o, m, h, branch, inject, x, layer.mhc.scale, rows);
-        const mixed2 = try hcPre(o, m, layer.mhc, x, rows, inject);
+        try hcBranchX(o, m, xn, branch, inject, layer.mhc.scale, rows);
+        const mixed2 = try hcPreX(o, m, layer.mhc, xn, rows, inject);
         const y = try hip.moe.run(o, m.act, layer.moe, mixed2, rows, !window);
         const next = if (i + 1 < m.layers.len) m.layers[i + 1].ahc.scale else m.mix.scale;
-        try hcBranch(o, m, h, y, inject, x, next, rows);
+        try hcBranchX(o, m, xn, y, inject, next, rows);
     }
     // a window's count moves in `Engine.round`, which a replay runs too: the launches change nothing on the host
     if (!window) for (segs) |g| {
         g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
     };
-    return .{ .mixed = try hcPre(o, m, m.mix, x, rows, null), .streams = h };
+    return .{ .mixed = try hcPreX(o, m, m.mix, xn, rows, null), .streams = h };
 }
 
 /// Streams a forward takes at once at most.

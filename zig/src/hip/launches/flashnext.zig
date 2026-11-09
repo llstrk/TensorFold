@@ -26,6 +26,8 @@ pub const Fns = struct {
     hc_norm: Function,
     /// tf_fn_hc_norm's bits on bf16 at one rank, 256 threads and 8-byte accesses.
     hc_norm_v4: Function,
+    /// hc_norm_v4's h_out and each (row, stream)'s rinv for x (a prompt's hc products read x from them).
+    hc_norm_rinv: Function,
     hc_gates: Function,
     rms_wide: Function,
     rms_wide_waves: Function,
@@ -49,6 +51,7 @@ pub const Fns = struct {
         return .{
             .hc_norm = try m.function("tf_fn_hc_norm"),
             .hc_norm_v4 = try m.function("tf_fn_hc_norm_v4"),
+            .hc_norm_rinv = try m.function("tf_fn_hc_norm_rinv"),
             .hc_gates = try m.function("tf_fn_hc_gates"),
             .rms_wide = try m.function("tf_fn_rms_wide"),
             .rms_wide_waves = try m.function("tf_fn_rms_wide_waves"),
@@ -134,6 +137,15 @@ pub fn hcNormShares(
     const aligned = (ad(h) | ad(branch) | ad(h_out) | ad(x_out)) % 8 == 0 and ad(scale) % 16 == 0;
     if (kind == 2 and world == 0 and @rem(dims, 4) == 0 and aligned) return l.go(l.fnx.hc_norm_v4, dim(streams, rows, 1), dim(256, 1, 1), 0, s, &a);
     try l.go(l.fnx.hc_norm, dim(streams, rows, 1), dim(1024, 1, 1), 0, s, &a);
+}
+
+/// hcNorm on bf16 (one rank) writing rinv (rows, streams) for x: bf16((h * rinv) * scale) is hcNorm's x.
+pub fn hcNormRinv(l: *const Launcher, h: C, branch: C, inject: C, h_out: P, rinv: F, scale: CF, rows: c_int, streams: c_int, dims: c_int, eps: f32, s: S) Error!void {
+    const aligned = (ad(h) | ad(branch) | ad(h_out)) % 8 == 0 and ad(scale) % 16 == 0;
+    if (dims > most_dims or @rem(dims, 4) != 0 or !aligned) return util.invalid("hcNormRinv");
+    var a: Args = .{};
+    inline for (.{ ad(h), ad(branch), ad(inject), ad(h_out), ad(rinv), ad(scale), streams, dims, eps }) |v| try a.add(v);
+    try l.go(l.fnx.hc_norm_rinv, dim(streams, rows, 1), dim(256, 1, 1), 0, s, &a);
 }
 
 /// act = silu(z / streams) and inject = 2 sigmoid(z / streams) from the down projection's fp32 sums (no inject: null).

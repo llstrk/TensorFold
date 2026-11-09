@@ -9,6 +9,8 @@ const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
+/// The fewest prompt rows fold=bf16 copies a weight for (its tile reads the copy only from there).
+pub const fold16_min_rows = affine.Copies.min_rows;
 pub const dense = @import("launches/dense.zig");
 
 const util = @import("launches/util.zig");
@@ -99,6 +101,10 @@ pub const Launcher = struct {
     /// The prompt scan in chunks of 32 on WMMA (policy delta=chunk): dk = dv = 128, no snapshots.
     gdn_chunk: [2]Function, // prep, walk
     delta_chunk: bool = false,
+    /// The routed prompt products' tall plan (items of up to 256 rows past an expert's first 128): the fold tiles only.
+    moe_tall: bool = false,
+    /// The router's prompt logits on the matrix cores from the BF16 rows (policy fold=on).
+    router_wmma: bool = false,
     /// The edge pass runs after the prompt tile (`edge_pass`; tests turn it off to see the tile alone).
     edge: bool,
     /// The MLX affine products and the registry that picks their tiles.
@@ -170,6 +176,7 @@ pub const Launcher = struct {
         moe_route_wide: [3]Function, // count, spans, place
         router_rows: [2]Function, // fp16, bf16
         router_tile: [2]Function,
+        router_wmma: Function,
         router_small: [2]Function,
         rms_rows: Function,
         qk_rope: Function,
@@ -207,6 +214,7 @@ pub const Launcher = struct {
         l.wide = choices.wide;
         l.sparse_wmma = choices.sparse_wmma;
         l.delta_chunk = choices.delta_chunk;
+        l.router_wmma = choices.products.fold;
         l.edge = edge_pass;
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode"), .select_rows = .{ try dec.function("tf_select_rows16"), try dec.function("tf_select_rows32") } };
         l.plan = .{
@@ -260,6 +268,7 @@ pub const Launcher = struct {
             .moe_route_wide = .{ try ops.function("tf_moe_route_count"), try ops.function("tf_moe_route_spans"), try ops.function("tf_moe_route_place") },
             .router_rows = .{ try ops.function("tf_router_rows_f16"), try ops.function("tf_router_rows_bf16") },
             .router_tile = .{ try ops.function("tf_router_tile_f16"), try ops.function("tf_router_tile_bf16") },
+            .router_wmma = try ops.function("tf_router_wmma_bf16"),
             .router_small = .{ try ops.function("tf_router_small_f16"), try ops.function("tf_router_small_bf16") },
             .rms_rows = try ops.function("tf_rms_rows"),
             .qk_rope = try ops.function("tf_qk_rope"),
@@ -336,6 +345,12 @@ pub const Launcher = struct {
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
         l.affine = try affine.Kernels.load(tiles, dot2, chip, choices.products);
+        l.moe_tall = l.affine.matrix and l.affine.matrix_fold;
+        if (choices.products.fold16 and l.affine.matrix) {
+            const c = std.heap.page_allocator.create(affine.Copies) catch return error.Invalid;
+            c.* = .{ .gpa = std.heap.page_allocator, .limit = 16 << 30 };
+            l.affine.copies = c;
+        }
         l.dense = try dense.Kernels.load(tiles, chip.act == .bf16, chip.matrix == .wmma12, choices.products.matrix);
         try l.affine.fillByteLut(r, dot2);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
@@ -343,6 +358,11 @@ pub const Launcher = struct {
     }
 
     pub fn unload(l: *Launcher) void {
+        if (l.affine.copies) |c| {
+            c.deinit();
+            std.heap.page_allocator.destroy(c);
+            l.affine.copies = null;
+        }
         for (&l.mods) |*m| m.unload();
     }
 
@@ -361,6 +381,7 @@ pub const Launcher = struct {
     pub const tf_rope_prefill = rope.tf_rope_prefill;
     pub const routerTile = moe.routerTile;
     pub const routerBf16 = moe.routerBf16;
+    pub const routerWmma = moe.routerWmma;
     pub const routerWith = moe.routerWith;
     pub const routerWindow = moe.routerWindow;
     pub const tf_moe_router = moe.tf_moe_router;
@@ -411,6 +432,7 @@ pub const Launcher = struct {
     pub const tf_dense_rows = elementwise.tf_dense_rows;
     pub const fn_hc_norm = flashnext.hcNorm;
     pub const fn_hc_norm_shares = flashnext.hcNormShares;
+    pub const fn_hc_norm_rinv = flashnext.hcNormRinv;
     pub const fn_hc_gates = flashnext.hcGates;
     pub const fn_hc_mix = flashnext.hcMix;
     pub const fn_hc_mix16 = flashnext.hcMix16;

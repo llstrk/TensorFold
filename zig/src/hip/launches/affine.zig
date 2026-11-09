@@ -15,6 +15,7 @@ const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
 const stream_pick = @import("stream_pick.zig");
 const stream_layout = @import("stream_layout.zig");
+const affine_fold = @import("affine_fold.zig");
 
 const Error = runtime.Error;
 
@@ -22,7 +23,7 @@ const Error = runtime.Error;
 pub const Matrix = enum { auto, on, off };
 
 /// Which product tiles a run takes where two give the same bits; every one defaults on.
-pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true };
+pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true, fold: bool = false, fold16: bool = false };
 
 /// quant/mlx.hpp's GroupTable, Routing and Affine as the kernels take them by value.
 pub const GroupTable = extern struct { p: u64, kind: c_int };
@@ -97,6 +98,7 @@ pub const Tile = enum { gemm, block };
 
 /// Which GEMM tile of the 128-row family a launch runs: the matrix cores, the dot2 tile, or the reference tile.
 pub const BlockKind = enum { matrix, gemm, block };
+pub const Copies = affine_fold.Copies;
 
 pub const Kernels = struct {
     /// Whether block shape `tier` can take `m` rows: a tile that does not loop over its rows holds rb * r of them.
@@ -128,6 +130,12 @@ pub const Kernels = struct {
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    /// The matrix tile with the group terms folded into the staged BF16 weights (policy fold=on): not its bits.
+    wmma_fold: [bit_widths.len]Function,
+    matrix_fold: bool,
+    folds: affine_fold.Functions,
+    /// The BF16 copies by weight words, made at a prompt's first product; null without fold=bf16.
+    copies: ?*Copies,
     item: @import("matrix_item.zig").Functions,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
@@ -148,11 +156,14 @@ pub const Kernels = struct {
         k.mode = choices.matrix;
         k.tile = if (choices.gemm) .gemm else .block;
         k.stream_on = choices.stream;
+        k.matrix_fold = choices.fold;
+        k.copies = null;
         k.stream_interleave = true;
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
         if (wmma) try k.resolve("7DotBF16", "Li8E", tiles_obj) else try k.resolve("6DotF16", "Li16E", tiles_obj);
+        if (k.matrix) k.folds = try affine_fold.Functions.load(tiles_obj);
         const r = "_ZN2tf4rocm";
         k.span = .{ try dot2_obj.function(r ++ "16affine_dot2_spanILi1EEEvNS0_6AffineEPfi"), try dot2_obj.function(r ++ "16affine_dot2_spanILi8EEEvNS0_6AffineEPfi") };
         k.fold = try dot2_obj.function(r ++ "16affine_dot2_foldEPKfNS0_10GroupTableES3_Pfiii");
@@ -168,6 +179,7 @@ pub const Kernels = struct {
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
+            if (k.matrix) k.wmma_fold[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_foldILi{d}EEEvNS0_6AffineE", .{bits}));
             if (k.matrix) k.item[b] = try @import("matrix_item.zig").load(m, bits);
             k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
             inline for (kp_tiles, 0..) |t, i| {
@@ -219,12 +231,12 @@ pub const Kernels = struct {
     }
 
     /// Launches on `s`; the counting stream runs nothing.
-    fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
+    pub fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
         if (s == util.counting) return;
         try hl.launch(f, .{ .grid = grid, .block = block }, .{ .r = r, .handle = s }, args);
     }
 
-    fn refuse(what: []const u8) Error {
+    pub fn refuse(what: []const u8) Error {
         std.log.err("affine: {s}", .{what});
         return error.Invalid;
     }
@@ -241,7 +253,7 @@ pub const Kernels = struct {
         };
     }
 
-    fn cdiv(n: c_int, by: c_int) c_uint {
+    pub fn cdiv(n: c_int, by: c_int) c_uint {
         return @intCast(@divTrunc(n + by - 1, by));
     }
 
@@ -429,8 +441,9 @@ pub const Kernels = struct {
         const b = bitIndex(a.bits) orelse return refuse("bits");
         var args: hl.Args = .{};
         try args.add(a);
+        if (try affine_fold.blockGo(k, r, a, s, items, kind, b, &args)) return;
         const f = switch (kind) {
-            .matrix => k.wmma_gemm[b],
+            .matrix => if (k.matrix_fold) k.wmma_fold[b] else k.wmma_gemm[b],
             .gemm => k.gemm[b],
             .block => k.block[b],
         };

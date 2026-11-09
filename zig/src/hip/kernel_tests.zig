@@ -39,6 +39,7 @@ test {
     _ = @import("kernel_tests/affine/rows.zig");
     _ = @import("kernel_tests/affine/order.zig");
     _ = @import("kernel_tests/affine/round.zig");
+    _ = @import("kernel_tests/affine/fold.zig");
     _ = @import("kernel_tests/affine/layout.zig");
     _ = @import("kernel_tests/affine/golden.zig");
     _ = @import("kernel_tests/graph_split.zig");

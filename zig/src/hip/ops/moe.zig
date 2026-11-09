@@ -30,6 +30,7 @@ pub fn moeRouterRows(o: Ops, x: Tensor, rows32: u64, rows16: u64, logits: u64, r
     if (o.window) if (o.l.routerWindow(p(x.ptr), @backingInt(x.kind), f(rows32), f(logits), int(r), int(d), int(e), o.stream)) |ran| {
         if (ran) return;
     } else |err| return err;
+    if (o.prefill and rows16 != 0) if (try o.l.routerWmma(p(x.ptr), p(rows16), @backingInt(x.kind), f(logits), int(r), int(d), int(e), o.stream)) return;
     if (o.prefill and d % 32 == 0) return o.l.routerTile(p(x.ptr), @backingInt(x.kind), f(rows32), f(logits), int(r), int(d), int(e), o.stream);
     try o.l.tf_moe_router(p(x.ptr), @backingInt(x.kind), f(rows32), f(logits), int(r), int(d), int(e), o.stream);
 }

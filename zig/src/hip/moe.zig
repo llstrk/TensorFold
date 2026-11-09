@@ -47,6 +47,8 @@ pub const Routed = struct {
 const LANE_ROWS = 8;
 const BLOCK_ROWS = 128;
 const BLOCK_FROM = 64;
+/// The tall plan's most rows an item (fold tiles, launches.moe_tall): an expert's pairs past its first 128.
+const TALL_ROWS = 256;
 const TILE = 16;
 
 /// MoEBuffers' size for `rows` rows: the next power of two from 16.
@@ -162,6 +164,7 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     } else {
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         tile = tileFor(o, rows);
+        if (tile == BLOCK_ROWS and o.l.moe_tall) tile = TALL_ROWS;
         try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
     }
     // beside the stack the shared pair's id is the stack's first id past its experts: zero its item, never read its row

@@ -53,6 +53,16 @@ pub fn routerWindow(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, 
     return true;
 }
 
+/// The prompt router on gfx11's matrix cores from the BF16 rows (policy fold=on); false where it does not apply.
+pub fn routerWmma(l: *const Launcher, x: C, bf16: C, kind: c_int, logits: F, r: c_int, d: c_int, e: c_int, s: S) Error!bool {
+    const c = @import("../caps.zig").Caps.of(@import("../kernels.zig").arch) orelse return false;
+    if (!l.router_wmma or c.matrix != .wmma11 or kind != 2 or r < 16 or @rem(d, 64) != 0 or ad(bf16) == 0 or ad(x) % 16 != 0 or ad(bf16) % 16 != 0) return false;
+    var a: Args = .{};
+    inline for (.{ ad(x), ad(bf16), ad(logits), r, d, e }) |v| try a.add(v);
+    try l.go(l.op.router_wmma, dim(cdiv(e, 128), cdiv(r, 128), 1), dim(256, 1, 1), 0, s, &a);
+    return true;
+}
+
 /// A lane round's router over the stored bf16 rows, which are the fp32 rows' values held narrower.
 pub fn routerBf16(l: *const Launcher, x: C, bf16: C, kind: c_int, logits: F, r: c_int, d: c_int, e: c_int, s: S) Error!bool {
     if (!l.fuse or r < 1 or r > 16 or @rem(d, 4) != 0 or ad(x) % 8 != 0 or ad(bf16) % 8 != 0) return false;
