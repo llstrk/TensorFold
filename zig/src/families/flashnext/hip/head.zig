@@ -24,7 +24,7 @@ pub fn caches(
     return cache.Caches.init(gpa, d, h.dims, &.{false}, cap, act, eos);
 }
 
-/// `tokens` (each the token after its row) over `streams` from `pos`; `prompt`: a prompt chunk's rows on prompt tiles.
+/// `tokens` (each after its row) over `streams` from `pos`; `prompt`: a chunk's rows, caches only, outputs unread.
 pub fn run(
     ops: Ops,
     prompt: bool,
@@ -80,6 +80,12 @@ pub fn run(
     const mixed = try forward.hcPre(o, m, l.ahc, x, rows, inject);
     const seg = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = pos }};
     c.pooled = @min(c.pooled, pos / d.index_ratio);
+    if (prompt) {
+        // a prompt's rows: only the layer's caches are read later (its first draw runs the last row as a window)
+        try mixers.sparseKeys(o, m, d, l.mixer.sparse, &seg, 0, mixed, rows, dev_pos);
+        c.pooled = (pos + rows) / d.index_ratio;
+        return .{ .mixed = x, .streams = h };
+    }
     const branch = try mixers.sparse(o, m, d, l.mixer.sparse, &seg, 0, mixed, rows, dev_pos, host, null);
     try forward.hcNorm(o, m, h, branch, inject, x, l.mhc.scale, rows);
     const mixed2 = try forward.hcPre(o, m, l.mhc, x, rows, inject);
