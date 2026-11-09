@@ -6,6 +6,22 @@
 
 namespace {
 
+// An expert's items of `c` pairs: at most `tile` pairs each; tile 256 is the tall plan, items of up to 256 pairs while
+// more than 128 remain, then one of the rest (affine_wmma_fold_tall's items and the 128-row tile's).
+__device__ __forceinline__ int route_tall_big(int c) { return c > 128 ? (c - 128 + 255) / 256 : 0; }
+__device__ __forceinline__ int route_items(int c, int tile) {
+    if (tile != 256) return (c + tile - 1) / tile;
+    const int big = route_tall_big(c);
+    return big + (c > big * 256 ? 1 : 0);
+}
+// item `within` of the expert's: its first pair (from the expert's start) and its count (0 past the expert's items)
+__device__ __forceinline__ void route_cut(int c, int tile, int within, int& first, int& count) {
+    first = within * tile;
+    const int left = c - first;
+    const int most = tile != 256 || within < route_tall_big(c) ? tile : 128;
+    count = left < 0 ? 0 : (left > most ? most : left);
+}
+
 // Stable-sorts the pairs by expert into members and cuts items of at most `tile` pairs; one block, counted per segment.
 extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts, int tile, int* members, int* items,
                                  int capacity) {
@@ -42,7 +58,7 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
     int own_c = 0, own_n = 0;
     for (int e = lo; e < hi; ++e) {
         own_c += counts[e];
-        own_n += (counts[e] + tile - 1) / tile;
+        own_n += route_items(counts[e], tile);
     }
     scan_c[t] = own_c;
     scan_n[t] = own_n;
@@ -58,7 +74,7 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
     for (int e = lo; e < hi; ++e) {
         starts[e] = start;
         start += counts[e];
-        end += (counts[e] + tile - 1) / tile;
+        end += route_items(counts[e], tile);
         ends[e] = end;
     }
     __syncthreads();
@@ -77,12 +93,13 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
             else hi = mid;
         }
         int e = lo < experts - 1 ? lo : experts - 1;
-        int reps = (counts[e] + tile - 1) / tile;
+        int reps = route_items(counts[e], tile);
         int within = slot - (ends[e] - reps);
-        int count = counts[e] - within * tile;
+        int first, count;
+        route_cut(counts[e], tile, within, first, count);
         items[slot * 3] = e;
-        items[slot * 3 + 1] = starts[e] + within * tile;
-        items[slot * 3 + 2] = count < 0 ? 0 : (count > tile ? tile : count);
+        items[slot * 3 + 1] = starts[e] + first;
+        items[slot * 3 + 2] = count;
     }
 }
 
@@ -134,7 +151,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_moe_route_place(const int* p
     int start = 0, end = 0;
     for (int e0 = 0; e0 < experts; e0 += 32) {
         const int e = e0 + lane;
-        const int c = e < experts ? totals[e] : 0, n = (c + tile - 1) / tile;
+        const int c = e < experts ? totals[e] : 0, n = route_items(c, tile);
         int sc = c, sn = n;
 #pragma unroll
         for (int o = 1; o < 32; o <<= 1) {
@@ -182,12 +199,13 @@ extern "C" __global__ void __launch_bounds__(32) tf_moe_route_place(const int* p
         }
         const int e = l < experts - 1 ? l : experts - 1;
         const int c = totals[e];
-        const int reps = (c + tile - 1) / tile;
+        const int reps = route_items(c, tile);
         const int within = slot - (ends[e] - reps);
-        const int count = c - within * tile;
+        int first, count;
+        route_cut(c, tile, within, first, count);
         items[slot * 3] = e;
-        items[slot * 3 + 1] = starts[e] + within * tile;
-        items[slot * 3 + 2] = count < 0 ? 0 : (count > tile ? tile : count);
+        items[slot * 3 + 1] = starts[e] + first;
+        items[slot * 3 + 2] = count;
     }
 }
 

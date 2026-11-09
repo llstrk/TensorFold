@@ -72,10 +72,10 @@ tf_fn_hc_norm(const void* h, const void* branch, const void* inject, void* h_out
 // tf_fn_hc_norm's bits on bf16 (one rank) with 256 threads and 8-byte accesses: thread u stands for tf_fn_hc_norm's
 // threads 4u..4u+3 (four neighbouring dims of each 1024-wide pass), keeps their four sums apart, and runs their xor
 // tree (masks 16, 8, 4 as lane xors 4, 2, 1; masks 2 and 1 among its own four), then the 32 waves' sums in order.
-extern "C" __global__ void __launch_bounds__(256)
-tf_fn_hc_norm_v4(const void* h, const void* branch, const void* inject, void* h_out, void* x_out, const float* scale,
-                 int kind, int streams, int dims, float eps, int world, long long stride) {
-    (void)kind; (void)world; (void)stride;
+template <bool kRinv>
+__device__ __forceinline__ void hc_norm_v4_body(const void* h, const void* branch, const void* inject, void* h_out,
+                                                void* x_out, float* rinv_out, const float* scale, int streams,
+                                                int dims, float eps) {
     __shared__ float scratch[kNormThreads / 32];
     const int s = blockIdx.x, r = blockIdx.y, u = threadIdx.x;
     const long long base = (static_cast<long long>(r) * streams + s) * dims;
@@ -124,6 +124,7 @@ tf_fn_hc_norm_v4(const void* h, const void* branch, const void* inject, void* h_
     float total = 0.f;
     for (int w = 0; w < kNormThreads / 32; ++w) total += scratch[w];
     const float rinv = rsqrtf(total / static_cast<float>(dims) + eps);
+    if (kRinv && u == 0) rinv_out[static_cast<long long>(r) * streams + s] = rinv;
 #pragma unroll
     for (int j = 0; j < kNormPer; ++j) {
         const int d0 = 4 * u + j * kNormThreads;
@@ -134,12 +135,28 @@ tf_fn_hc_norm_v4(const void* h, const void* branch, const void* inject, void* h_
             o.y = static_cast<uint32_t>(float_to_bf16(v[j][2])) | static_cast<uint32_t>(float_to_bf16(v[j][3])) << 16;
             *reinterpret_cast<uint2*>(static_cast<uint16_t*>(h_out) + base + d0) = o;
         }
+        if (kRinv) continue;
         const float4 sc = *reinterpret_cast<const float4*>(scale + static_cast<long long>(s) * dims + d0);
         uint2 o;
         o.x = static_cast<uint32_t>(float_to_bf16((v[j][0] * rinv) * sc.x)) | static_cast<uint32_t>(float_to_bf16((v[j][1] * rinv) * sc.y)) << 16;
         o.y = static_cast<uint32_t>(float_to_bf16((v[j][2] * rinv) * sc.z)) | static_cast<uint32_t>(float_to_bf16((v[j][3] * rinv) * sc.w)) << 16;
         *reinterpret_cast<uint2*>(static_cast<uint16_t*>(x_out) + base + d0) = o;
     }
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+tf_fn_hc_norm_v4(const void* h, const void* branch, const void* inject, void* h_out, void* x_out, const float* scale,
+                 int kind, int streams, int dims, float eps, int world, long long stride) {
+    (void)kind; (void)world; (void)stride;
+    hc_norm_v4_body<false>(h, branch, inject, h_out, x_out, nullptr, scale, streams, dims, eps);
+}
+
+// tf_fn_hc_norm_v4's h_out and, for x, each (row, stream)'s rinv (rows, streams) fp32: the prompt's hc down
+// projection and mix read x as bf16((h * rinv) * scale) from them (HcNormed), the bytes x_out would hold.
+extern "C" __global__ void __launch_bounds__(256)
+tf_fn_hc_norm_rinv(const void* h, const void* branch, const void* inject, void* h_out, float* rinv, const float* scale,
+                   int streams, int dims, float eps) {
+    hc_norm_v4_body<true>(h, branch, inject, h_out, nullptr, rinv, scale, streams, dims, eps);
 }
 
 // From z [rows, low (+ streams with inject)] / streams: silu for the up projection, 2 sigmoid for the inject gates.

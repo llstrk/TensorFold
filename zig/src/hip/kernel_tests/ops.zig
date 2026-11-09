@@ -208,7 +208,7 @@ test "argmax and top-k follow torch's order: the larger value, then the lower in
     try std.testing.expectEqual(@as(i32, -1), gi[2 * stride]);
 }
 
-test "the MoE route sorts pairs by expert, stably, into items of at most a tile" {
+test "the MoE route sorts pairs by expert, stably, into items of at most a tile (tile 256: the tall plan)" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     const o = t.ops(&t.on);
@@ -224,6 +224,11 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile"
         .{ 512, 11 * 2048, 128 },
         .{ 1024, 9000, 16 },
         .{ 7, 600 * 1024 + 5, 128 },
+        // the tall plan: items of up to 256 pairs while more than 128 remain, then one of the rest; one block and wide
+        .{ 129, 3000, 256 },
+        .{ 512, 2816, 256 },
+        .{ 512, 60000, 256 },
+        .{ 37, 9000, 256 },
     }) |shape| {
         const experts = shape[0];
         const pairs = shape[1];
@@ -237,7 +242,10 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile"
         @memset(counts, 0);
         for (picks) |p| counts[@intCast(p)] += 1;
         var capacity: usize = 0;
-        for (counts) |c| capacity += (c + tile - 1) / tile;
+        for (counts) |c| {
+            var left = c;
+            while (left > 0) : (capacity += 1) left -= cut(left, tile);
+        }
         capacity += 3;
         var dev_picks = try t.upload(picks);
         defer dev_picks.free();
@@ -262,7 +270,7 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile"
             var left = counts[e];
             var first = start;
             while (left > 0) : (slot += 1) {
-                const take = @min(left, tile);
+                const take = cut(left, tile);
                 try std.testing.expectEqualSlices(i32, &.{ @intCast(e), @intCast(first), @intCast(take) }, gi[slot * 3 ..][0..3]);
                 first += take;
                 left -= take;
@@ -271,6 +279,12 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile"
         // the slots past the plan are empty items
         for (slot..capacity) |s| try std.testing.expectEqual(@as(i32, 0), gi[s * 3 + 2]);
     }
+}
+
+/// The route's next item of `left` pairs: at most `tile`; tile 256 takes 256 while more than 128 are left.
+fn cut(left: usize, tile: usize) usize {
+    if (tile == 256) return if (left > 128) @min(left, 256) else left;
+    return @min(left, tile);
 }
 
 fn silu(x: f64) f64 {

@@ -1,4 +1,4 @@
-//! Flash Next's hyper-connection norm on 256 threads (tf_fn_hc_norm_v4) against the 1,024-thread kernel it replaces.
+//! Flash Next's hyper-connection kernels (256-thread norm, 16-bit gates' mix, rinv norm) against what they replace.
 
 const std = @import("std");
 const rig = @import("rig.zig");
@@ -104,4 +104,67 @@ test "tf_fn_hc_mix16 on gates cast to the activation type writes tf_fn_hc_mix's 
     const hgot = try rig.download(u16, got);
     defer gpa.free(hgot);
     try std.testing.expectEqualSlices(u16, hw, hgot);
+}
+
+/// ops/common.hpp's float_to_bf16: nearest even (no NaN here).
+fn bf16Nearest(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+test "tf_fn_hc_norm_rinv writes tf_fn_hc_norm's h, and its rinv rebuilds x's bytes as bf16((h * rinv) * scale)" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    if (t.kind() != 2) return error.SkipZigTest;
+    var rng: rig.Rng = .{ .state = 0x4C17 };
+    const rows = 5;
+    const s = 4;
+    const d = 2560;
+    const w = s * d;
+    const eps: f32 = 1e-6;
+    const hh = try fx.acts(t, &rng, rows * w, 2.0);
+    defer gpa.free(hh);
+    const hb = try fx.acts(t, &rng, rows * d, 1.0);
+    defer gpa.free(hb);
+    const hi = try fx.acts(t, &rng, rows * s, 1.0);
+    defer gpa.free(hi);
+    const scale = try gpa.alloc(f32, w);
+    defer gpa.free(scale);
+    for (scale) |*x| x.* = 1.0 + rng.unit() * 0.5;
+    var h = try t.upload(hh);
+    defer h.free();
+    var h2 = try t.upload(hh);
+    defer h2.free();
+    var branch = try t.upload(hb);
+    defer branch.free();
+    var inject = try t.upload(hi);
+    defer inject.free();
+    var sc = try t.upload(scale);
+    defer sc.free();
+    var h_out = try t.alloc(rows * w * 2);
+    defer h_out.free();
+    var x_out = try t.alloc(rows * w * 2);
+    defer x_out.free();
+    var rinv = try t.alloc(rows * s * 4);
+    defer rinv.free();
+    var a: util.Args = .{};
+    inline for (.{ at(h), at(branch), at(inject), at(h_out), at(x_out), at(sc), @as(c_int, 2), @as(c_int, s), @as(c_int, d), eps, @as(c_int, 0), @as(i64, 0) }) |v| try a.add(v);
+    try t.on.go(t.on.fnx.hc_norm, util.dim(s, rows, 1), util.dim(1024, 1, 1), 0, t.stream.handle, &a);
+    const P = ?*anyopaque;
+    const CP = ?*const anyopaque;
+    try t.on.fn_hc_norm_rinv(@as(CP, @ptrFromInt(at(h2))), @as(CP, @ptrFromInt(at(branch))), @as(CP, @ptrFromInt(at(inject))), @as(P, @ptrFromInt(at(h2))), @ptrFromInt(at(rinv)), @ptrFromInt(at(sc)), rows, s, d, eps, t.stream.handle);
+    try t.stream.synchronize();
+    const want_h = try rig.download(u16, h_out);
+    defer gpa.free(want_h);
+    const want_x = try rig.download(u16, x_out);
+    defer gpa.free(want_x);
+    const got_h = try rig.download(u16, h2);
+    defer gpa.free(got_h);
+    const got_r = try rig.download(f32, rinv);
+    defer gpa.free(got_r);
+    try std.testing.expectEqualSlices(u16, want_h, got_h);
+    for (0..rows) |r| for (0..s) |si| for (0..d) |j| {
+        const i = (r * s + si) * d + j;
+        try std.testing.expectEqual(want_x[i], bf16Nearest((fx.value(t, got_h[i]) * got_r[r * s + si]) * scale[si * d + j]));
+    };
 }

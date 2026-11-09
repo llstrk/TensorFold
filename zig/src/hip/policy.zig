@@ -14,6 +14,8 @@ pub const Pick = enum { auto, reference };
 pub const Sparse = enum { auto, wmma };
 /// DeltaNet's prompt scan: `chunk` takes chunks of 32 on WMMA (opt-in, another summation order).
 pub const Delta = enum { auto, chunk };
+/// Prompt tiles with group terms folded into BF16 weights (opt-in, new bits); `bf16` keeps the copies (more memory).
+pub const Fold = enum { auto, on, bf16 };
 
 /// MTP drafting: `--mtp-drafts` and `--mtp-confidence`.
 pub const Mtp = struct { drafts: u8 = 3, confidence: f64 = 0.3 };
@@ -45,6 +47,7 @@ pub const Policy = struct {
     fuse: Pick = .auto,
     sparse: Sparse = .auto,
     delta: Delta = .auto,
+    fold: Fold = .auto,
     prefill_step: u32 = 1024,
     /// Prompt rows a chunk while other streams decode: a multiple of 64 dividing 1024 (the idle chunk).
     fill_rows: u32 = 512,
@@ -86,7 +89,7 @@ pub const Policy = struct {
             .on => .on,
             .off => .off,
         };
-        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .sparse_wmma = p.sparse == .wmma, .delta_chunk = p.delta == .chunk, .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn() } };
+        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .sparse_wmma = p.sparse == .wmma, .delta_chunk = p.delta == .chunk, .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn(), .fold = p.fold != .auto, .fold16 = p.fold == .bf16 } };
     }
 
     /// Whether the 64-row prefill attention tile is on.
@@ -119,7 +122,7 @@ pub const Policy = struct {
 
     fn set(p: *Policy, key: []const u8, value: []const u8) Error!void {
         const eql = std.mem.eql;
-        if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "sparse")) p.sparse = try parseEnum(Sparse, value) else if (eql(u8, key, "delta")) p.delta = try parseEnum(Delta, value) else if (eql(u8, key, "prefill_step")) {
+        if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "sparse")) p.sparse = try parseEnum(Sparse, value) else if (eql(u8, key, "delta")) p.delta = try parseEnum(Delta, value) else if (eql(u8, key, "fold")) p.fold = try parseEnum(Fold, value) else if (eql(u8, key, "prefill_step")) {
             p.prefill_step = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "fill_rows")) {
             p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
@@ -140,6 +143,7 @@ pub const Policy = struct {
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
         if (p.sparse != .auto) try w.print(",sparse={t}", .{p.sparse});
         if (p.delta != .auto) try w.print(",delta={t}", .{p.delta});
+        if (p.fold != .auto) try w.print(",fold={t}", .{p.fold});
         if (p.graph_fail >= 0) try w.print(",graph_fail={d}", .{p.graph_fail});
         if (p.rccl_lib.slice()) |path| try w.print(",rccl_lib={s}", .{path});
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
@@ -153,7 +157,7 @@ pub const Policy = struct {
         const pack = [_]u32{
             @backingInt(p.matrix), @backingInt(p.attention), @backingInt(p.kernels), @backingInt(p.graphs),
             @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),    @backingInt(p.sparse),
-            @backingInt(p.delta),
+            @backingInt(p.delta),  @backingInt(p.fold),
         };
         var nibbles: [2]u32 = .{ 0, 0 };
         for (pack, 0..) |v, i| nibbles[i / 8] |= v << @intCast(4 * (i % 8));
@@ -163,7 +167,7 @@ pub const Policy = struct {
     /// `local` with every field rank 0 sent; a rank keeps its own graph fault and library path.
     pub fn fromWords(w: [word_count]u32, local: Policy) Policy {
         var p = local;
-        var vals: [9]u32 = undefined;
+        var vals: [10]u32 = undefined;
         for (&vals, 0..) |*v, i| v.* = (w[i / 8] >> @intCast(4 * (i % 8))) & 0xf;
         p.matrix = @fromBackingInt(@intCast(vals[0]));
         p.attention = @fromBackingInt(@intCast(vals[1]));
@@ -174,6 +178,7 @@ pub const Policy = struct {
         p.fuse = @fromBackingInt(@intCast(vals[6]));
         p.sparse = @fromBackingInt(@intCast(vals[7]));
         p.delta = @fromBackingInt(@intCast(vals[8]));
+        p.fold = @fromBackingInt(@intCast(vals[9]));
         p.mtp = .{ .drafts = @truncate(w[1] >> 24), .confidence = @bitCast(@as(u64, w[3]) | @as(u64, w[4]) << 32) };
         p.prefill_step = w[2];
         p.slots = w[5];
