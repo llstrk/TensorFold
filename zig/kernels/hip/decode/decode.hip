@@ -543,3 +543,5 @@ extern "C" __global__ void __launch_bounds__(kSelectThreads)
                      int top_k) {
     select_body(logits, pick, wts, items, members, capacity, experts, top_k);
 }
+
+#include "decode/select_rows.hpp"
