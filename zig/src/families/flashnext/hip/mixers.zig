@@ -77,15 +77,23 @@ pub fn linear(
         }
         return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, true);
     }
-    const mixed = try o.arena.of(f32, rows * ch);
+    // the conv writes q, k and v as their own rows, with q and k normed in it where its blocks hold whole heads
+    const fused = kw % 256 == 0 and ch % 256 == 0 and d.key_dim == 128;
+    const qk_norm: ?hip.ops.QkNorm = if (fused) .{ .q = m.qk.q, .k = m.qk.k, .eps = m.qk.eps } else null;
+    const qc = if (fused) q else try o.arena.of(f32, rows * kw);
+    const kc = if (fused) k else try o.arena.of(f32, rows * kw);
     var off: usize = 0;
     for (segs) |g| {
         const n = g.tokens.len;
         const st = g.c.linearAt(index);
-        const out = mixed + off * ch * 4;
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
-        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, next, n, ch, d.conv, null);
+        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, qc + off * kw * 4, next, n, ch, d.conv, .{
+            .key_width = kw,
+            .k = kc + off * kw * 4,
+            .v = v + off * vw * 4,
+            .norm = qk_norm,
+        });
         if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
             @ptrFromInt(st.conv),
             @ptrFromInt(next),
@@ -94,28 +102,10 @@ pub fn linear(
         ));
         off += n;
     }
-    const mixed_t: Tensor = .{ .ptr = mixed, .kind = .f32 };
-    const qc = try o.arena.of(f32, rows * kw);
-    const kc = try o.arena.of(f32, rows * kw);
-    try o.copyCols(mixed_t, ch, 0, qc, rows, kw);
-    try o.copyCols(mixed_t, ch, kw, kc, rows, kw);
-    try o.copyCols(mixed_t, ch, 2 * kw, v, rows, vw);
-    try o.rms(
-        .{ .ptr = qc, .kind = .f32 },
-        m.qk.q,
-        .{ .ptr = q, .kind = .f32 },
-        rows * d.key_heads,
-        d.key_dim,
-        m.qk.eps,
-    );
-    try o.rms(
-        .{ .ptr = kc, .kind = .f32 },
-        m.qk.k,
-        .{ .ptr = k, .kind = .f32 },
-        rows * d.key_heads,
-        d.key_dim,
-        m.qk.eps,
-    );
+    if (!fused) {
+        try o.rms(.{ .ptr = qc, .kind = .f32 }, m.qk.q, .{ .ptr = q, .kind = .f32 }, rows * d.key_heads, d.key_dim, m.qk.eps);
+        try o.rms(.{ .ptr = kc, .kind = .f32 }, m.qk.k, .{ .ptr = k, .kind = .f32 }, rows * d.key_heads, d.key_dim, m.qk.eps);
+    }
     try o.gdnGatePrefill(a, b, l.a_log, l.dt_bias, gate, beta, rows, d.value_heads);
     return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, false);
 }

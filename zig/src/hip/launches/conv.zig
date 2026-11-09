@@ -80,6 +80,14 @@ pub fn tf_conv_split(l: *const Launcher, c: ConvArgs, s: S) Error!void {
     try l.go(l.dec.conv_split, dim(cdiv(c.channels, 128) + gate_blocks, c.slots, 1), dim(128, 1, 1), 0, s, &a);
 }
 
+/// tf_conv_prefill with q and k RMS-normed over 128-wide heads as tf_rms_rows norms them.
+pub fn tf_conv_prefill_qknorm(l: *const Launcher, x: C, kind: c_int, weight: CF, state: CF, out: F, new_state: F, len: c_int, channels: c_int, kernel: c_int, k_out: F, v_out: F, key_width: c_int, q_weight: CF, k_weight: CF, eps: f32, s: S) Error!void {
+    if (kernel > 8 or key_width < 1 or @rem(key_width, 256) != 0 or @rem(channels, 256) != 0) return invalid("conv_prefill_qknorm");
+    var a: Args = .{};
+    inline for (.{ ad(x), kind, ad(weight), ad(state), ad(out), ad(new_state), len, channels, kernel, ad(k_out), ad(v_out), key_width, ad(q_weight), ad(k_weight), eps }) |v| try a.add(v);
+    try l.go(l.op.conv_prefill_qknorm, dim(@divExact(channels, 256), @max(1, cdiv(len, 16)), 1), dim(256, 1, 1), 0, s, &a);
+}
+
 pub fn tf_conv_prefill(l: *const Launcher, x: C, kind: c_int, weight: CF, state: CF, out: F, new_state: F, len: c_int, channels: c_int, kernel: c_int, k_out: F, v_out: F, key_width: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(x));

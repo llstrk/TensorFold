@@ -9,7 +9,16 @@ const f = t.f;
 const int = t.int;
 
 /// Where convPrefill writes the k and v channels when `out` takes only the first `key_width` (q) of each row.
-pub const ConvSplit = struct { k: u64, v: u64, key_width: usize };
+pub const ConvSplit = struct {
+    k: u64,
+    v: u64,
+    key_width: usize,
+    /// q and k RMS-normed in the conv over 128-wide heads, as tf_rms_rows norms them (key_width, channels % 256 == 0)
+    norm: ?QkNorm = null,
+};
+
+/// The q and k norms' weights (null: none) and epsilon.
+pub const QkNorm = struct { q: ?u64, k: ?u64, eps: f32 };
 
 pub fn convPrefill(o: Ops, x: Tensor, weight: u64, state: ?u64, out: u64, new_state: u64, len: usize, channels: usize, kernel: usize, split: ?ConvSplit) Error!void {
     if (kernel < 1 or kernel > 8) return error.BadShape;
@@ -17,6 +26,12 @@ pub fn convPrefill(o: Ops, x: Tensor, weight: u64, state: ?u64, out: u64, new_st
     const k_out = if (split) |sp| f(sp.k) else null;
     const v_out = if (split) |sp| f(sp.v) else null;
     const key_width = if (split) |sp| int(sp.key_width) else 0;
+    if (split) |sp| if (sp.norm) |nm| {
+        if (sp.key_width % 256 != 0 or channels % 256 != 0) return error.BadShape;
+        const qw = if (nm.q) |w| f(w) else null;
+        const kw = if (nm.k) |w| f(w) else null;
+        return o.l.tf_conv_prefill_qknorm(p(x.ptr), @backingInt(x.kind), f(weight), if (state) |s| f(s) else null, f(out), f(new_state), int(len), int(channels), int(kernel), k_out, v_out, key_width, qw, kw, nm.eps, o.stream);
+    };
     try o.l.tf_conv_prefill(p(x.ptr), @backingInt(x.kind), f(weight), if (state) |s| f(s) else null, f(out), f(new_state), int(len), int(channels), int(kernel), k_out, v_out, key_width, o.stream);
 }
 

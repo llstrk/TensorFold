@@ -156,6 +156,7 @@ pub const Launcher = struct {
         argmax_join: Function,
         topk: Function,
         conv_prefill: Function,
+        conv_prefill_qknorm: Function,
         gdn_gate_prefill: Function,
         dense_rows: Function,
         moe_route: Function,
@@ -242,6 +243,7 @@ pub const Launcher = struct {
             .argmax_join = try ops.function("tf_argmax_join"),
             .topk = try ops.function("tf_topk"),
             .conv_prefill = try ops.function("tf_conv_prefill"),
+            .conv_prefill_qknorm = try ops.function("tf_conv_prefill_qknorm"),
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
             .dense_rows = try ops.function("tf_dense_rows"),
             .moe_route = try ops.function("tf_moe_route"),
@@ -341,6 +343,7 @@ pub const Launcher = struct {
     pub const tf_conv_rows = conv.tf_conv_rows;
     pub const tf_conv_split = conv.tf_conv_split;
     pub const tf_conv_prefill = conv.tf_conv_prefill;
+    pub const tf_conv_prefill_qknorm = conv.tf_conv_prefill_qknorm;
     pub const tf_qk_rope = rope.tf_qk_rope;
     pub const tf_rope_decode = rope.tf_rope_decode;
     pub const tf_rope_prefill = rope.tf_rope_prefill;
