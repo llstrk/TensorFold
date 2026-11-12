@@ -190,7 +190,7 @@ test "the router over the stored bf16 rows writes the bits the router over the f
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
     // both activation kinds: the weights are bf16 whichever one the chip's activations are
-    for ([_]c_int{ 1, 2 }) |kind| for ([_]usize{ 1, 2, 4, 8, 16 }) |rows| {
+    for ([_]c_int{ 1, 2 }) |kind| for ([_]usize{ 1, 2, 4, 8, 9, 12, 16 }) |rows| {
         try routerRows(t, &rng, kind, rows, 2048, 257, false);
     };
     for ([_]c_int{ 1, 2 }) |kind| {
