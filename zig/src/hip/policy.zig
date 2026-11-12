@@ -11,6 +11,9 @@ pub const Attention = enum { auto, f32 };
 /// One kernel family switched to its reference, apart from `kernels=reference` that switches them all.
 pub const Pick = enum { auto, reference };
 
+/// The draft head's vocabulary: as stored, or 4 bits from load (opt-in; drafts move, verified output does not).
+pub const Draft = enum { auto, q4 };
+
 /// MTP drafting: `--mtp-drafts` and `--mtp-confidence`.
 pub const Mtp = struct { drafts: u8 = 3, confidence: f64 = 0.3 };
 
@@ -50,6 +53,8 @@ pub const Policy = struct {
     graph_fail: i32 = -1,
     /// The RCCL library to load first. Local to a rank.
     rccl_lib: Path = .{},
+    /// `draft=q4`: the draft vocabulary at 4 bits. Local to the drafting rank.
+    draft: Draft = .auto,
 
     pub const Error = error{ UnknownKey, BadValue, StepNotAligned };
 
@@ -119,6 +124,8 @@ pub const Policy = struct {
             p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "graph_fail")) {
             p.graph_fail = std.fmt.parseInt(i32, value, 10) catch return error.BadValue;
+        } else if (eql(u8, key, "draft")) {
+            p.draft = try parseEnum(Draft, value);
         } else if (eql(u8, key, "rccl_lib")) try p.rccl_lib.set(value) else return error.UnknownKey;
     }
 
@@ -133,6 +140,7 @@ pub const Policy = struct {
         if (p.gemm != .auto) try w.print(",gemm={t}", .{p.gemm});
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
         if (p.graph_fail >= 0) try w.print(",graph_fail={d}", .{p.graph_fail});
+        if (p.draft != .auto) try w.print(",draft={t}", .{p.draft});
         if (p.rccl_lib.slice()) |path| try w.print(",rccl_lib={s}", .{path});
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
     }

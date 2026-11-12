@@ -228,6 +228,7 @@ test {
     _ = slice;
     _ = convert;
     _ = mlx;
+    _ = @import("mlx_requant.zig");
     _ = dense;
     _ = bf16;
     _ = experts;

@@ -135,7 +135,7 @@ pub const Engine = struct {
         const rank: ?core.quant.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
         // the index drives both the MTP head's root (oMLX keeps it outside language_model) and the shard spelling
         const map = try weightMapOf(e.keep.allocator(), io, dir);
-        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act, index.mtpRoot(map));
+        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act, index.mtpRoot(map), o.policy.draft == .q4);
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
         const spelling = index.ngramSpelling(map);

@@ -392,7 +392,7 @@ test "the MTP head's HIP names follow the index's root, so oMLX's top-level mtp.
 }
 
 /// One rank's weights (`rank` null: the whole model) from `ck`; rank 0 also holds the MTP head under `mtp_root`.
-pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind, mtp_root: []const u8) !Weights {
+pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind, mtp_root: []const u8, draft_q4: bool) !Weights {
     var w: Weights = .{ .gpa = gpa };
     errdefer w.deinit();
     const tables: Tables = .{ .ck = ck, .cfg = c };
@@ -423,7 +423,15 @@ pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoi
     const drafts = if (rank) |r| r.rank == 0 else true;
     if (drafts and c.mtp.layers > 0) {
         _ = arena.reset(.retain_capacity);
-        const draft_rows = try quant.sliceRows(l.a, head, try draftSpans(l.a));
+        // draft_q4 (policy draft=q4): the draft vocabulary requantized to 4 bits
+        var draft_rows = try quant.sliceRows(l.a, head, try draftSpans(l.a));
+        if (draft_q4) switch (draft_rows) {
+            .mlx => |h| if (h.bits > 4) {
+                draft_rows = .{ .mlx = try quant.mlx.requant4(l.a, h) };
+                std.log.info("draft: {d} vocabulary rows requantized from {d} to 4 bits", .{ quant.Host.rows(draft_rows), h.bits });
+            },
+            else => std.log.warn("draft=q4: the draft vocabulary is not MLX affine; kept as stored", .{}),
+        };
         const nm = try mtpNames(l.a, l.mtp_root);
         w.model.mtp = .{
             .e_norm = try l.scale(nm.norm_embedding),
