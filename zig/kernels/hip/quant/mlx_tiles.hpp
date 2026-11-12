@@ -13,6 +13,7 @@
 #include "tiles/matrix_gemm.hpp"
 #include "tiles/matrix_item.hpp"
 #include "tiles/stream.hpp"
+#include "tiles/stream_one.hpp"
 
 namespace tf {
 namespace rocm {
@@ -76,6 +77,12 @@ __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream(Affine a
                                                                        int gshift) {
     using Epi = std::conditional_t<PAIR, StreamSwiglu<T>, StreamRound<T>>;
     stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, Epi, R, CB>(a, sides, lpc_log2, gshift);
+}
+
+// A product of one round (a column's chunks fit its 2^LOG lanes): a wave walks column groups with x kept, same bits.
+template <typename T, int BITS, int R, int LOG>
+__global__ void __launch_bounds__(32 * kOneWaves) affine_dot2_one(Affine a, int gshift) {
+    stream_one_tile<MlxDecoder<BITS>, T, StreamRound<T>, R, stream_one_cb(R), LOG>(a, gshift);
 }
 
 // The plain product (or plan item) with Nemotron's relu^2 as the epilogue, into a.out16 in the activation type.

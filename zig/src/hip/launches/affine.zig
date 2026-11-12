@@ -121,6 +121,7 @@ pub const Kernels = struct {
     /// The same tile with Nemotron's relu^2 as its epilogue, and with two such products in one launch.
     relu2: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    decode: @import("affine_decode.zig").Tiles, // the decode stream tiles
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
     /// Off lays a round's stream row blocks on the grid's y: the reference layout the interleaved one must equal.
@@ -166,6 +167,7 @@ pub const Kernels = struct {
 
     fn resolve(k: *Kernels, comptime dot: []const u8, comptime shape: []const u8, m: Module) Error!void {
         @setEvalBranchQuota(300_000);
+        k.decode = try @import("affine_decode.zig").load(m, dot);
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
@@ -221,7 +223,7 @@ pub const Kernels = struct {
     }
 
     /// Launches on `s`; the counting stream runs nothing.
-    fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
+    pub fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
         if (s == util.counting) return;
         try hl.launch(f, .{ .grid = grid, .block = block }, .{ .r = r, .handle = s }, args);
     }
@@ -341,6 +343,7 @@ pub const Kernels = struct {
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
         const ri = stream_pick.rowTile(a.m);
+        if (!relu2 and try @import("affine_decode.zig").go(k, r, a, sides, lpc_log2, ri, items, s)) return;
         const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, total_n, items, sides.pair_cols > 0);
         const per_block = tile.per_block;
         var blocks: c_uint = cdiv(total_n, per_block);
