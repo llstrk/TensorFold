@@ -69,7 +69,7 @@ __device__ inline void stream_one_body(typename Dec::Args& a, int gshift, int by
         }
     };
     auto work = [&](int g, const uint32_t (&w)[CB][KW], const unsigned short (&sr)[CB], const unsigned short (&br)[CB]) {
-        float v[R][CB];
+        float v[R][CB] = {};
 #pragma unroll
         for (int c = 0; c < CB; ++c) {
             const float sc = live ? terms.widen(sr[c]) : 0.f;
@@ -78,6 +78,7 @@ __device__ inline void stream_one_body(typename Dec::Args& a, int gshift, int by
             stream_codes<Dec, T>(w[c], qp, std::make_integer_sequence<int, 16>{});
 #pragma unroll
             for (int r = 0; r < R; ++r) {
+                if (row0 + r >= a.m) break;  // an item's rows: a routed expert at four rows has one or two
                 float d = 0.f;
 #pragma unroll
                 for (int i = 0; i < 16; ++i) d = T::dot(xp[r][i], qp[i], d);
@@ -86,6 +87,7 @@ __device__ inline void stream_one_body(typename Dec::Args& a, int gshift, int by
         }
 #pragma unroll
         for (int r = 0; r < R; ++r) {
+            if (row0 + r >= a.m) break;
 #pragma unroll
             for (int c = 0; c < CB; ++c) {
 #pragma unroll

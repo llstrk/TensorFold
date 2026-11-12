@@ -29,8 +29,10 @@ __device__ inline void stream_lds_body(typename Dec::Args& a, int gshift, int by
     const int nch = a.k >> 5;
     const int row0 = by * R;
 
-    // stage the rows' chunks: [r][v][q] as u32x4 so a wave's lanes read 512 contiguous bytes
-    for (int t = threadIdx.x; t < R * nch; t += blockDim.x) {
+    // stage the rows' chunks: [r][v][q] as u32x4 so a wave's lanes read 512 contiguous bytes; only the item's rows
+    // (a routed expert at four rows has one or two), the products stop at them
+    const int staged = a.m - row0 < R ? a.m - row0 : R;
+    for (int t = threadIdx.x; t < staged * nch; t += blockDim.x) {
         const int r = t / nch;
         const int q = t - r * nch;
         const u32x4* src = reinterpret_cast<const u32x4*>(IdentityAct<T>::row(a, row0 + r < a.m ? row0 + r : 0) +
