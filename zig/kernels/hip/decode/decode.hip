@@ -29,6 +29,7 @@ constexpr int kRouterWaves = 4;
 constexpr int kRouterSteps = 16;  // float4 loads a lane keeps in flight
 constexpr int kRouterRows = 16;
 constexpr int kRouterGroups = 4;  // bf16 weight groups a lane keeps in flight
+constexpr int kRouterNear = 8;    // rows up to which the bf16 router loads a batch's x with its weights
 
 // The bf16 rows' router: 16 rows a block, a wave an expert, each lane summing (lane * 4 + 128 * g) x, y, z, w.
 template <int KIND>
@@ -42,11 +43,55 @@ __device__ void router_bf16(const void* x, const void* rows, float* logits, int 
     logits += static_cast<long long>(first) * e;
     const int rows_left = r - first;
     const int live = rows_left < kRouterRows ? rows_left : kRouterRows;
+    // a lane's group: four values a count, strided by the block's width, so its sums meet the fp32 kernel's
+    const int groups = (d + 127) / 128;
+    if (live <= kRouterNear) {
+        // every live row's x of a batch issued with its weights, so rows do not wait for L2 in turn: the same fmas
+        float acc[kRouterNear];
+#pragma unroll
+        for (int k = 0; k < kRouterNear; ++k) acc[k] = 0.f;
+        for (int g = 0; g < groups; g += kRouterGroups) {
+            uint2 wv[kRouterGroups];
+            uint2 xv[kRouterGroups][kRouterNear];
+#pragma unroll
+            for (int p = 0; p < kRouterGroups; ++p) {
+                const int at = lane * 4 + 128 * (g + p);
+                const bool on = g + p < groups && at < d;
+                wv[p] = on ? *reinterpret_cast<const uint2*>(wb + at) : make_uint2(0u, 0u);
+#pragma unroll
+                for (int k = 0; k < kRouterNear; ++k)
+                    xv[p][k] = on && k < live ? *reinterpret_cast<const uint2*>(xb + static_cast<long long>(k) * d + at)
+                                              : make_uint2(0u, 0u);
+            }
+#pragma unroll
+            for (int p = 0; p < kRouterGroups; ++p) {
+                const int at = lane * 4 + 128 * (g + p);
+                if (g + p >= groups || at >= d) continue;
+                const float4 w = widen4<2>(make_uint2(wv[p].x, wv[p].y));
+#pragma unroll
+                for (int k = 0; k < kRouterNear; ++k) {
+                    if (k >= live) continue;
+                    const float4 xf = widen4<KIND>(xv[p][k]);
+                    acc[k] = fmaf(xf.x, w.x, acc[k]);
+                    acc[k] = fmaf(xf.y, w.y, acc[k]);
+                    acc[k] = fmaf(xf.z, w.z, acc[k]);
+                    acc[k] = fmaf(xf.w, w.w, acc[k]);
+                }
+            }
+        }
+#pragma unroll
+        for (int k = 0; k < kRouterNear; ++k) {
+            if (k >= live) break;
+            float v = acc[k];
+#pragma unroll
+            for (int mask = 16; mask > 0; mask >>= 1) v += __shfl_xor(v, mask, 32);
+            if (lane == 0) logits[static_cast<long long>(k) * e + expert] = v;
+        }
+        return;
+    }
     float acc[kRouterRows];
 #pragma unroll
     for (int k = 0; k < kRouterRows; ++k) acc[k] = 0.f;
-    // a lane's group: four values a count, strided by the block's width, so its sums meet the fp32 kernel's
-    const int groups = (d + 127) / 128;
     for (int g = 0; g < groups; g += kRouterGroups) {
         uint2 wv[kRouterGroups];
 #pragma unroll
