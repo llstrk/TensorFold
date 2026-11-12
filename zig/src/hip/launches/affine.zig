@@ -85,6 +85,7 @@ pub const stream_waves = 4; // kStreamWaves
 pub const streams_wanted = 3000; // kStreamWavesWanted
 pub const stream_code_words = 32; // kStreamCodeWords
 /// The widths with a one-round tile; its waves a block and column groups a wave (kOneWaves, kOneGroups).
+pub const lds_waves = 4;
 pub const one_bits = [_]c_int{ 4, 5 };
 pub const one_waves = 4;
 pub const one_groups = 4;
@@ -130,6 +131,10 @@ pub const Kernels = struct {
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// The one-round tile (tiles/stream_one.hpp) at 4 and 5 bits, by rows and lanes a column (16, 32).
     one: [one_bits.len][stream_rows.len][2]Function,
+    /// The LDS tile (tiles/stream_lds.hpp) for the stream pick of four rows, CB 4, 32 lanes (`stream_lds` off: none).
+    lds_plain: ?Function = null,
+    lds_pair: ?Function = null,
+    stream_lds: bool = false,
     /// Off leaves the one-round products on the stream tile: the reference the one-round tile must equal.
     stream_one: bool,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
@@ -170,6 +175,7 @@ pub const Kernels = struct {
         k.copies = null;
         k.stream_interleave = true;
         k.stream_one = true;
+        k.stream_lds = true;
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
@@ -221,6 +227,12 @@ pub const Kernels = struct {
     pub fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
         if (s == util.counting) return;
         try hl.launch(f, .{ .grid = grid, .block = block }, .{ .r = r, .handle = s }, args);
+    }
+
+    /// `go` with `shared` bytes of dynamic LDS.
+    pub fn goShared(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, shared: u32, s: abi.Stream, args: *hl.Args) Error!void {
+        if (s == util.counting) return;
+        try hl.launch(f, .{ .grid = grid, .block = block, .shared = shared }, .{ .r = r, .handle = s }, args);
     }
 
     pub fn refuse(what: []const u8) Error {
@@ -314,6 +326,7 @@ pub const Kernels = struct {
 
     pub const streamGo = stream.streamGo;
     pub const relu2Go = stream.relu2Go;
+    pub const ldsTakes = stream.ldsTakes;
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
     pub fn rowGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int) Error!void {
