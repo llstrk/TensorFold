@@ -168,3 +168,109 @@ test "tf_fn_hc_norm_rinv writes tf_fn_hc_norm's h, and its rinv rebuilds x's byt
         try std.testing.expectEqual(want_x[i], bf16Nearest((fx.value(t, got_h[i]) * got_r[r * s + si]) * scale[si * d + j]));
     };
 }
+
+test "the decode hc products with the gates and the mix as epilogues write the bytes of the products and tf_fn_hc_gates and tf_fn_hc_mix" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    if (t.kind() != 2) return error.SkipZigTest;
+    const affine = @import("../launches/affine.zig");
+    const k = &t.on.affine;
+    var rng: rig.Rng = .{ .state = 0x4CF5 };
+    const s = 4;
+    const d = 2560;
+    const low = 320;
+    const wide = s * d;
+    const most = 5;
+    // the down (low + inject rows, wide) and the up (wide, low) at 5 bits, group 64, BF16 tables
+    const down_n = low + s;
+    const words = struct {
+        fn make(r: *rig.Rng, n: usize) ![]u32 {
+            const w = try gpa.alloc(u32, n);
+            for (w) |*v| v.* = @truncate(r.next());
+            return w;
+        }
+        fn tables(tt: *Rig, r: *rig.Rng, n: usize, scale: f32, base_v: f32) ![]u16 {
+            const v = try gpa.alloc(u16, n);
+            for (v) |*x| x.* = tt.bits(base_v + r.unit() * scale);
+            return v;
+        }
+    };
+    const hdw = try words.make(&rng, down_n * wide * 5 / 32);
+    defer gpa.free(hdw);
+    const hds = try words.tables(t, &rng, down_n * wide / 64, 0.002, 0.003);
+    defer gpa.free(hds);
+    const hdb = try words.tables(t, &rng, down_n * wide / 64, 0.02, -0.03);
+    defer gpa.free(hdb);
+    const huw = try words.make(&rng, wide * low * 5 / 32);
+    defer gpa.free(huw);
+    const hus = try words.tables(t, &rng, wide * low / 64, 0.02, 0.02);
+    defer gpa.free(hus);
+    const hub = try words.tables(t, &rng, wide * low / 64, 0.2, -0.3);
+    defer gpa.free(hub);
+    var dw = try t.upload(hdw);
+    defer dw.free();
+    var ds = try t.upload(hds);
+    defer ds.free();
+    var db = try t.upload(hdb);
+    defer db.free();
+    var uw = try t.upload(huw);
+    defer uw.free();
+    var us = try t.upload(hus);
+    defer us.free();
+    var ub = try t.upload(hub);
+    defer ub.free();
+    const hx = try fx.acts(t, &rng, most * wide, 2.0);
+    defer gpa.free(hx);
+    var bufs: [8]DeviceBuffer = undefined;
+    const sizes = [_]usize{ most * wide * 2, most * down_n * 4, most * low * 2, most * s * 2, most * wide * 4, most * d * 2, most * low * 2, most * s * 2 };
+    for (&bufs, sizes) |*b, n| b.* = try t.alloc(n);
+    defer for (&bufs) |*b| b.free();
+    const x, const z, const act_want, const inj_want, const g, const mix_want, const act_got, const inj_got = bufs;
+    var mix_got = try t.alloc(most * d * 2);
+    defer mix_got.free();
+    const st = t.stream.handle;
+    const r = &t.r;
+    var bad: usize = 0;
+    for ([_]bool{ false, true }) |poison| {
+        const hxp = try gpa.dupe(u16, hx);
+        defer gpa.free(hxp);
+        // an infinity in row 1's streams sends its sums through the tiles' repair
+        if (poison) hxp[wide + 77] = 0x7f80;
+        try x.upload(0, std.mem.sliceAsBytes(hxp));
+        for ([_]bool{ true, false }) |with_inject| {
+            const n_down: c_int = if (with_inject) down_n else low;
+            for (1..most + 1) |rows| {
+                const m: c_int = @intCast(rows);
+                const down: affine.Arg = .{ .x = at(x), .words = at(dw), .scale = .{ .p = at(ds), .kind = 1 }, .bias = .{ .p = at(db), .kind = 1 }, .out = at(z), .m = m, .n = n_down, .k = wide, .bits = 5, .group = 64, .fp16 = 0 };
+                try k.streamGo(r, down, .{}, n_down, 1, st);
+                try t.on.fn_hc_gates(@ptrFromInt(at(z)), @ptrFromInt(at(act_want)), if (with_inject) @ptrFromInt(at(inj_want)) else null, 2, m, low, s, st);
+                var fused = down;
+                fused.out = if (with_inject) at(inj_got) else 0;
+                fused.out16 = at(act_got);
+                try k.gatesGo(r, fused, low, st);
+                const up: affine.Arg = .{ .x = at(act_want), .words = at(uw), .scale = .{ .p = at(us), .kind = 1 }, .bias = .{ .p = at(ub), .kind = 1 }, .out = at(g), .m = m, .n = wide, .k = low, .bits = 5, .group = 64, .fp16 = 0 };
+                try k.streamGo(r, up, .{}, wide, 1, st);
+                try t.on.fn_hc_mix(@ptrFromInt(at(g)), @ptrFromInt(at(x)), @ptrFromInt(at(mix_want)), 2, m, s, d, st);
+                var mixup = up;
+                mixup.out = 0;
+                try std.testing.expect(k.oneMixFits(mixup, d));
+                try k.oneMixGo(r, mixup, at(x), at(mix_got), d, st);
+                try t.stream.synchronize();
+                const pairs = [_][2]DeviceBuffer{ .{ act_want, act_got }, .{ inj_want, inj_got }, .{ mix_want, mix_got } };
+                const lens = [_]usize{ rows * low, if (with_inject) rows * s else 0, rows * d };
+                for (pairs, lens, 0..) |pr, len, which| {
+                    if (len == 0) continue;
+                    const want = try rig.download(u16, pr[0]);
+                    defer gpa.free(want);
+                    const got = try rig.download(u16, pr[1]);
+                    defer gpa.free(got);
+                    var diff: usize = 0;
+                    for (want[0..len], got[0..len]) |a, b| diff += @intFromBool(a != b);
+                    if (diff != 0) std.debug.print("  hc fused {s} rows {d} inject {} inf {}: {d} differ\n", .{ ([_][]const u8{ "act", "inject", "mixed" })[which], rows, with_inject, poison, diff });
+                    bad += diff;
+                }
+            }
+        }
+    }
+    try std.testing.expect(bad == 0);
+}

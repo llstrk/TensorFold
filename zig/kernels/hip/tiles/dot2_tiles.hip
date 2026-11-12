@@ -382,6 +382,18 @@ using Dot = DotF16;
 // the LDS tile where its kbench wins: 5-bit plain products and 4-bit gate|up pairs, four rows, 32 lanes a column
 template __global__ void affine_dot2_lds<Dot, 5, 4, 4, 5>(Affine, StreamSides, int);
 template __global__ void affine_dot2_lds_swiglu<Dot, 4, 4, 4, 5>(Affine, StreamSides, int);
+// Flash Next's hc products at 5 bits: the down with tf_fn_hc_gates, the up on the one-round tile with tf_fn_hc_mix
+template __global__ void affine_dot2_one_mix<Dot, 5, 1, 4>(Affine, int, const uint16_t*, uint16_t*, int);
+template __global__ void affine_dot2_one_mix<Dot, 5, 2, 4>(Affine, int, const uint16_t*, uint16_t*, int);
+template __global__ void affine_dot2_one_mix<Dot, 5, 4, 4>(Affine, int, const uint16_t*, uint16_t*, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 1, 2>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 1, 4>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 1, 8>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 2, 2>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 2, 4>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 2, 8>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 4, 2>(Affine, StreamSides, int, int);
+template __global__ void affine_dot2_stream_gates<Dot, 5, 4, 4>(Affine, StreamSides, int, int);
 // the one-round tile for the widths whose one-round products Flash Next runs (hc up 5-bit, experts' down 4-bit)
 TF_ONE(4)
 TF_ONE(5)

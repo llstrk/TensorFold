@@ -63,6 +63,18 @@ pub const Out = struct { mixed: Tensor, streams: Tensor };
 
 /// A hyper-connection's read of the normed streams `x`: the block input, and the inject gates when `inject` is set.
 pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize, inject: ?Tensor) !Tensor {
+    // a decode's two hc products with the gates and the mix as their epilogues where the tiles take them: same bytes
+    if (m.act == .bf16 and m.dims.streams == 4) {
+        const d = m.dims;
+        const before = o.arena.mark();
+        const act = try take(o, m.act, rows * d.low);
+        const mixed = try take(o, m.act, rows * d.hidden);
+        if (try o.projectHcGates(x, hc.down, rows, d.low, act, inject)) {
+            if (try o.projectHcUpMix(act, hc.up, rows, x, mixed, d.hidden)) return mixed;
+            return hcMix(o, m, hc, x, rows, act);
+        }
+        o.arena.release(before);
+    }
     const z = try o.project(x, hc.down, rows, true);
     return hcMix(o, m, hc, x, rows, try hcGates(o, m, z, rows, inject));
 }

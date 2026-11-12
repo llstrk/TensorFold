@@ -104,6 +104,32 @@ struct StreamSwiglu {
     }
 };
 
+// tf_fn_hc_gates on the hc down projection's sums (bf16 activations): column c < low (`pair_cols`) writes the up
+// projection's input silu(v) to out16 (rows, low), a later column the inject gate 2 sigmoid(v) to `out` read as
+// (rows, n - low) bf16; v = round(round(sum) / 4) as tf_fn_hc_gates rounds z at four streams. The same bytes, no z.
+template <class T>
+struct StreamHcGates {
+    static constexpr bool kPair = false;
+
+    static __device__ __forceinline__ float bf16r(float f) {
+        if (f != f) return __uint_as_float(0x7fc00000u);
+        const uint32_t u = __float_as_uint(f);
+        return __uint_as_float(((u + (((u >> 16) & 1u) + 0x7fffu)) >> 16) << 16);
+    }
+    static __device__ __forceinline__ uint16_t bf16(float f) { return static_cast<uint16_t>(__float_as_uint(bf16r(f)) >> 16); }
+
+    template <int CB, class Args>
+    __device__ static void put(const Args& a, long long row, int col, const float (&v)[CB], int c, int low, float) {
+        constexpr float kStreams = 4.f;  // Flash Next's hyper-connection streams, the divisor tf_fn_hc_gates takes
+        const float g = bf16r(bf16r(v[c]) / kStreams);
+        if (col < low) {
+            static_cast<uint16_t*>(static_cast<void*>(a.out16))[row * low + col] = bf16(g / (1.0f + expf(-g)));
+        } else {
+            static_cast<uint16_t*>(static_cast<void*>(a.out))[row * (a.n - low) + col - low] = bf16(2.f * bf16r(1.0f / (1.0f + expf(-g))));
+        }
+    }
+};
+
 // tf_nemo_relu2 on the sum: relu(the sum rounded to T)^2, the square rounded to fp32 before it is rounded to T.
 template <class T>
 struct StreamRelu2 {

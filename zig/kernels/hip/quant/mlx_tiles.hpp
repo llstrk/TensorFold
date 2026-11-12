@@ -165,7 +165,8 @@ __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream(Affine a
 // A product of one round (a column's chunks fit its 2^LOG lanes): a wave walks column groups with x kept, same bits.
 template <typename T, int BITS, int R, int LOG>
 __global__ void __launch_bounds__(32 * kOneWaves) affine_dot2_one(Affine a, int gshift) {
-    stream_one_tile<MlxDecoder<BITS>, T, StreamRound<T>, R, stream_one_cb(R), LOG>(a, gshift);
+    constexpr int CB = stream_one_cb(R);
+    stream_one_tile<MlxDecoder<BITS>, T, OnePlain<StreamRound<T>, CB, LOG>, R, CB, LOG>(a, {}, gshift);
 }
 
 // Several-round products of many columns at three or four rows with the rows' x staged in LDS (tiles/stream_lds.hpp);
@@ -179,6 +180,21 @@ __global__ void __launch_bounds__(32 * kLdsWaves) affine_dot2_lds(Affine a, Stre
 template <typename T, int BITS, int R, int CB, int LOG>
 __global__ void __launch_bounds__(32 * kLdsWaves) affine_dot2_lds_swiglu(Affine a, StreamSides sides, int gshift) {
     stream_lds_tile<MlxDecoder<BITS>, T, StreamSwiglu<T>, R, CB, LOG>(a, sides, gshift);
+}
+
+// hc up (n = 4 dims) on the one-round tile with tf_fn_hc_mix as its epilogue: mixed (m, dims) from xs, no g.
+template <typename T, int BITS, int R, int LOG>
+__global__ void __launch_bounds__(32 * kOneWaves) affine_dot2_one_mix(Affine a, int gshift, const uint16_t* xs,
+                                                                      uint16_t* mixed, int dims) {
+    stream_one_tile<MlxDecoder<BITS>, T, OneHcMix<LOG>, R, 4, LOG>(a, typename OneHcMix<LOG>::Extra{xs, mixed, dims}, gshift);
+}
+
+// hc down on the stream tile with tf_fn_hc_gates as its epilogue: out16 takes the silu gates (m, low), `out` the
+// inject gates (m, n - low) bf16; the same bytes as the product and tf_fn_hc_gates.
+template <typename T, int BITS, int R, int CB>
+__global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream_gates(Affine a, StreamSides sides, int lpc_log2,
+                                                                             int gshift) {
+    stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, StreamHcGates<T>, R, CB>(a, sides, lpc_log2, gshift);
 }
 
 // The plain product (or plan item) with Nemotron's relu^2 as the epilogue, into a.out16 in the activation type.

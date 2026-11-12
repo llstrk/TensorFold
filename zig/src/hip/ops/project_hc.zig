@@ -1,4 +1,4 @@
-//! Flash Next's hyper-connection products: the hc up and down projections with their mix and norm epilogues.
+//! Flash Next's hyper-connection products: the hc up and down projections with their mix, gates and norm epilogues.
 const t = @import("types.zig");
 const quant = @import("core").quant;
 const affine_launch = @import("../launches/affine.zig");
@@ -42,6 +42,73 @@ pub fn projectHcMix(o: Ops, x: Tensor, proj: Projection, m: usize, xs: Tensor, m
         .fp16 = 0,
         .out16 = 0,
     }, xs.ptr, mixed.ptr, @intCast(dims), o.stream);
+    return true;
+}
+
+/// A decode hc down with tf_fn_hc_gates as its epilogue into `act` and `inject`; false where the stream tile can't.
+pub fn projectHcGates(o: Ops, x: Tensor, proj: Projection, m: usize, low: usize, act: Tensor, inject: ?Tensor) Error!bool {
+    const h = switch (proj.handle) {
+        .mlx => |v| v,
+        .dense, .bf16 => return false,
+    };
+    const w = products.affineOf(proj, h);
+    try w.check();
+    const z = o.l;
+    if (o.prefill or m == 0 or x.kind != .bf16 or act.kind != .bf16 or !o.bf16 or w.bits != 5 or w.partial) return false;
+    if (inject) |j| if (j.kind != .bf16) return false;
+    if (w.n != low + @as(usize, if (inject != null) 4 else 0)) return false;
+    const tile = z.affine.choose(.project, .decode, products.shapeOf(o, x, w, m)) orelse return false;
+    if (tile.family != .stream) return false;
+    const kind = w.tables.table();
+    const arg: affine_launch.Arg = .{
+        .x = x.ptr,
+        .words = w.words,
+        .scale = .{ .p = w.scale, .kind = kind },
+        .bias = .{ .p = w.bias, .kind = kind },
+        .out = if (inject) |j| j.ptr else 0,
+        .m = int(m),
+        .n = int(w.n),
+        .k = int(w.k),
+        .bits = w.bits,
+        .group = w.group,
+        .fp16 = 0,
+        .out16 = act.ptr,
+    };
+    if (!z.affine.gatesFit(arg, int(low))) return false;
+    if (o.stream == counting) return true;
+    try z.affine.gatesGo(z.r, arg, int(low), o.stream);
+    return true;
+}
+
+/// A decode hc up of `act` with tf_fn_hc_mix as its epilogue into `mixed`; false where the one-round tile can't.
+pub fn projectHcUpMix(o: Ops, act: Tensor, proj: Projection, m: usize, xs: Tensor, mixed: Tensor, dims: usize) Error!bool {
+    const h = switch (proj.handle) {
+        .mlx => |v| v,
+        .dense, .bf16 => return false,
+    };
+    const w = products.affineOf(proj, h);
+    try w.check();
+    const z = o.l;
+    if (o.prefill or m == 0 or act.kind != .bf16 or xs.kind != .bf16 or mixed.kind != .bf16 or !o.bf16 or w.partial) return false;
+    const tile = z.affine.choose(.project, .decode, products.shapeOf(o, act, w, m)) orelse return false;
+    if (tile.family != .stream) return false;
+    const kind = w.tables.table();
+    const arg: affine_launch.Arg = .{
+        .x = act.ptr,
+        .words = w.words,
+        .scale = .{ .p = w.scale, .kind = kind },
+        .bias = .{ .p = w.bias, .kind = kind },
+        .out = 0,
+        .m = int(m),
+        .n = int(w.n),
+        .k = int(w.k),
+        .bits = w.bits,
+        .group = w.group,
+        .fp16 = 0,
+    };
+    if (!z.affine.oneMixFits(arg, int(dims))) return false;
+    if (o.stream == counting) return true;
+    try z.affine.oneMixGo(z.r, arg, xs.ptr, mixed.ptr, int(dims), o.stream);
     return true;
 }
 

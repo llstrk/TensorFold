@@ -131,6 +131,10 @@ pub const Kernels = struct {
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// The one-round tile (tiles/stream_one.hpp) at 4 and 5 bits, by rows and lanes a column (16, 32).
     one: [one_bits.len][stream_rows.len][2]Function,
+    /// Flash Next's 5-bit hc down with tf_fn_hc_gates as its epilogue (null where columns * rows > 16).
+    gates: [stream_rows.len][stream_cbs.len]?Function = @splat(@splat(null)),
+    /// The hc up on the one-round tile with tf_fn_hc_mix as its epilogue, by rows.
+    one_mix: [stream_rows.len]?Function = @splat(null),
     /// The LDS tile (tiles/stream_lds.hpp) for the stream pick of four rows, CB 4, 32 lanes (`stream_lds` off: none).
     lds_plain: ?Function = null,
     lds_pair: ?Function = null,
@@ -325,8 +329,12 @@ pub const Kernels = struct {
     // ---- the tiles ----
 
     pub const streamGo = stream.streamGo;
+    pub const gatesFit = stream.gatesFit;
+    pub const gatesGo = stream.gatesGo;
     pub const relu2Go = stream.relu2Go;
     pub const ldsTakes = stream.ldsTakes;
+    pub const oneMixFits = stream.oneMixFits;
+    pub const oneMixGo = stream.oneMixGo;
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
     pub fn rowGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int) Error!void {
