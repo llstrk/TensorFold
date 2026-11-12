@@ -6,6 +6,7 @@ const slice = @import("slice.zig");
 const convert = @import("convert.zig");
 const keys = @import("keys.zig");
 pub const geometry = @import("mlx_geometry.zig");
+pub const requant4 = @import("mlx_requant.zig").requant4;
 
 const Tensor = types.Tensor;
 const Allocator = std.mem.Allocator;
@@ -271,7 +272,8 @@ pub fn dequant(a: Allocator, words: Tensor, scale: Tensor, bias: Tensor, group: 
     return out;
 }
 
-fn hostOf(words: []const u32, scales: []const u16, biases: []const u16, rows_n: usize, bits: u8, group: u16) Host {
+/// A rank-2 host projection over `words` and its bf16 tables (no copies).
+pub fn hostOf(words: []const u32, scales: []const u16, biases: []const u16, rows_n: usize, bits: u8, group: u16) Host {
     const groups = scales.len / rows_n;
     return .{
         .words = .{ .dtype = .i32, .rank = 2, .shape = .{ rows_n, words.len / rows_n, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(words) },
@@ -544,4 +546,5 @@ test {
     _ = @import("mlx_geometry_test.zig");
     _ = @import("mlx_checkpoint_test.zig");
     _ = @import("mlx_affine.zig");
+    _ = @import("mlx_requant.zig");
 }

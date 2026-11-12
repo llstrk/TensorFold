@@ -17,6 +17,9 @@ pub const Delta = enum { auto, chunk };
 /// Prompt tiles with group terms folded into BF16 weights (opt-in, new bits); `bf16` keeps the copies (more memory).
 pub const Fold = enum { auto, on, bf16 };
 
+/// The draft head's vocabulary: as stored, or 4-bit at load (opt-in; drafts move, the verified output does not).
+pub const Draft = enum { auto, q4 };
+
 /// MTP drafting: `--mtp-drafts` and `--mtp-confidence`.
 pub const Mtp = struct { drafts: u8 = 3, confidence: f64 = 0.3 };
 
@@ -59,6 +62,8 @@ pub const Policy = struct {
     graph_fail: i32 = -1,
     /// The RCCL library to load first. Local to a rank.
     rccl_lib: Path = .{},
+    /// `draft=q4`: the draft vocabulary at 4 bits. Local to the drafting rank.
+    draft: Draft = .auto,
 
     pub const Error = error{ UnknownKey, BadValue, StepNotAligned };
 
@@ -128,6 +133,8 @@ pub const Policy = struct {
             p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "graph_fail")) {
             p.graph_fail = std.fmt.parseInt(i32, value, 10) catch return error.BadValue;
+        } else if (eql(u8, key, "draft")) {
+            p.draft = try parseEnum(Draft, value);
         } else if (eql(u8, key, "rccl_lib")) try p.rccl_lib.set(value) else return error.UnknownKey;
     }
 
@@ -145,6 +152,7 @@ pub const Policy = struct {
         if (p.delta != .auto) try w.print(",delta={t}", .{p.delta});
         if (p.fold != .auto) try w.print(",fold={t}", .{p.fold});
         if (p.graph_fail >= 0) try w.print(",graph_fail={d}", .{p.graph_fail});
+        if (p.draft != .auto) try w.print(",draft={t}", .{p.draft});
         if (p.rccl_lib.slice()) |path| try w.print(",rccl_lib={s}", .{path});
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
     }
