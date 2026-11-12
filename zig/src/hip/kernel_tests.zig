@@ -72,6 +72,7 @@ test {
     _ = @import("kernel_tests/affine/fold.zig");
     _ = @import("kernel_tests/affine/layout.zig");
     _ = @import("kernel_tests/affine/golden.zig");
+    _ = @import("kernel_tests/affine/one.zig");
     _ = @import("kernel_tests/graph_split.zig");
     _ = @import("kernel_tests/flashnext.zig");
     _ = @import("kernel_tests/flashnext_hc.zig");

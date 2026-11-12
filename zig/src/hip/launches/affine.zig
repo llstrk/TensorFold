@@ -84,6 +84,10 @@ pub const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 1
 pub const stream_waves = 4; // kStreamWaves
 pub const streams_wanted = 3000; // kStreamWavesWanted
 pub const stream_code_words = 32; // kStreamCodeWords
+/// The widths with a one-round tile; its waves a block and column groups a wave (kOneWaves, kOneGroups).
+pub const one_bits = [_]c_int{ 4, 5 };
+pub const one_waves = 4;
+pub const one_groups = 4;
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
@@ -124,6 +128,10 @@ pub const Kernels = struct {
     /// The same tile with Nemotron's relu^2 as its epilogue, and with two such products in one launch.
     relu2: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    /// The one-round tile (tiles/stream_one.hpp) at 4 and 5 bits, by rows and lanes a column (16, 32).
+    one: [one_bits.len][stream_rows.len][2]Function,
+    /// Off leaves the one-round products on the stream tile: the reference the one-round tile must equal.
+    stream_one: bool,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
     /// Off lays a round's stream row blocks on the grid's y: the reference layout the interleaved one must equal.
@@ -161,6 +169,7 @@ pub const Kernels = struct {
         k.matrix_fold = choices.fold;
         k.copies = null;
         k.stream_interleave = true;
+        k.stream_one = true;
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16

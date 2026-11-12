@@ -372,6 +372,17 @@ using Dot = DotF16;
     template __global__ void affine_wmma_skew<BITS>(Affine);                              \
     template __global__ void affine_wmma_fold<BITS>(Affine);
 
+#define TF_ONE(BITS)                                                   \
+    template __global__ void affine_dot2_one<Dot, BITS, 1, 4>(Affine, int); \
+    template __global__ void affine_dot2_one<Dot, BITS, 2, 4>(Affine, int); \
+    template __global__ void affine_dot2_one<Dot, BITS, 4, 4>(Affine, int); \
+    template __global__ void affine_dot2_one<Dot, BITS, 1, 5>(Affine, int); \
+    template __global__ void affine_dot2_one<Dot, BITS, 2, 5>(Affine, int); \
+    template __global__ void affine_dot2_one<Dot, BITS, 4, 5>(Affine, int);
+// the one-round tile for the widths whose one-round products Flash Next runs (hc up 5-bit, experts' down 4-bit)
+TF_ONE(4)
+TF_ONE(5)
+
 TF_TILES(2)
 TF_TILES(3)
 TF_TILES(4)
