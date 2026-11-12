@@ -378,6 +378,9 @@ using Dot = DotF16;
     template __global__ void affine_dot2_one<Dot, BITS, 1, 5>(Affine, int); \
     template __global__ void affine_dot2_one<Dot, BITS, 2, 5>(Affine, int); \
     template __global__ void affine_dot2_one<Dot, BITS, 4, 5>(Affine, int);
+// the LDS tile where its kbench wins: 5-bit plain products and 4-bit gate|up pairs, four rows, 32 lanes a column
+template __global__ void affine_dot2_lds<Dot, 5, 4, 4, 5>(Affine, StreamSides, int);
+template __global__ void affine_dot2_lds_swiglu<Dot, 4, 4, 4, 5>(Affine, StreamSides, int);
 // the one-round tile for the widths whose one-round products Flash Next runs (hc up 5-bit, experts' down 4-bit)
 TF_ONE(4)
 TF_ONE(5)

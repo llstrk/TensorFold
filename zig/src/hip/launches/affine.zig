@@ -343,7 +343,7 @@ pub const Kernels = struct {
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
         const ri = stream_pick.rowTile(a.m);
-        if (!relu2 and try @import("affine_decode.zig").go(k, r, a, sides, lpc_log2, ri, items, s)) return;
+        if (!relu2 and try @import("affine_decode.zig").go(k, r, a, sides, lpc_log2, ri, total_n, items, s)) return;
         const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, total_n, items, sides.pair_cols > 0);
         const per_block = tile.per_block;
         var blocks: c_uint = cdiv(total_n, per_block);

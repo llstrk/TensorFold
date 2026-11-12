@@ -14,6 +14,7 @@
 #include "tiles/matrix_item.hpp"
 #include "tiles/stream.hpp"
 #include "tiles/stream_one.hpp"
+#include "tiles/stream_lds.hpp"
 
 namespace tf {
 namespace rocm {
@@ -83,6 +84,19 @@ __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream(Affine a
 template <typename T, int BITS, int R, int LOG>
 __global__ void __launch_bounds__(32 * kOneWaves) affine_dot2_one(Affine a, int gshift) {
     stream_one_tile<MlxDecoder<BITS>, T, StreamRound<T>, R, stream_one_cb(R), LOG>(a, gshift);
+}
+
+// Several-round products of many columns at three or four rows with the rows' x staged in LDS (tiles/stream_lds.hpp);
+// launched with 68 bytes of dynamic LDS a row and chunk.
+template <typename T, int BITS, int R, int CB, int LOG>
+__global__ void __launch_bounds__(32 * kLdsWaves) affine_dot2_lds(Affine a, StreamSides sides, int gshift) {
+    stream_lds_tile<MlxDecoder<BITS>, T, StreamRound<T>, R, CB, LOG>(a, sides, gshift);
+}
+
+// gate|up pairs with swiglu into the activation type, as affine_dot2_stream with PAIR
+template <typename T, int BITS, int R, int CB, int LOG>
+__global__ void __launch_bounds__(32 * kLdsWaves) affine_dot2_lds_swiglu(Affine a, StreamSides sides, int gshift) {
+    stream_lds_tile<MlxDecoder<BITS>, T, StreamSwiglu<T>, R, CB, LOG>(a, sides, gshift);
 }
 
 // The plain product (or plan item) with Nemotron's relu^2 as the epilogue, into a.out16 in the activation type.
