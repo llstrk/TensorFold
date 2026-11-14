@@ -234,6 +234,8 @@ fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, str
     errdefer gpa.destroy(own);
     const fx = try lanes_mod.Fx.init(gpa, p.e, streams);
     errdefer fx.deinit();
+    // the first stream's caches at load: a first prompt otherwise waits on allocating and clearing them
+    try p.e.makeFirstSlot();
     // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB (on shared pages, what the streams leave)
     fx.keepPrompts(promptCacheBytes(o.cache_gib, p.shared, p.room, p.per * streams));
     var why: [96]u8 = undefined;
