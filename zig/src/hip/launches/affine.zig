@@ -425,11 +425,18 @@ pub const Kernels = struct {
     /// Prefill's tile, same bits however a prompt is cut: matrix on gfx11 unless off, else dot2 GEMM; few rows K-split.
     pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
-        const e = k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape");
+        const e = k.foldItems(k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape"));
         var arg = a;
         // this GPU's cut for a tile with K-parallel passes for items of few rows
         if (k.reg.rowOf(e)) |row| arg.route.few = @intCast(row.few_rows);
         try e.launch(k, .{ .r = r, .s = s, .arg = arg, .items = items });
+    }
+
+    /// Under fold=on|bf16, a routed prompt's few-row items on the fold tile too: bits independent of where it is cut.
+    pub fn foldItems(k: *const Kernels, e: *const Entry) *const Entry {
+        if (!k.matrix_fold or e.op != .routed or e.path != .prefill or !std.mem.eql(u8, e.id, "mlx.routed.prefill.item64")) return e;
+        for (k.reg.entries) |*x| if (std.mem.eql(u8, x.id, "mlx.routed.prefill.skew")) return x;
+        return e;
     }
 
     /// The product a prompt launch asks the registry about; a routed plan's pairs, and its average rows per expert.

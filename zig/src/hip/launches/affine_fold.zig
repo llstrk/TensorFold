@@ -145,7 +145,7 @@ pub fn pairFoldRun(k: *const Kernels, r: *const runtime.Runtime, a: Arg, limit: 
     if (@mod(a.n, 128) != 0 or @mod(a.k, 64) != 0) return false;
     var shape = Kernels.shapeOf(a, items);
     shape.plan_pairs = @intCast(@max(pairs, 0));
-    const e = k.choose(.routed, .prefill, shape) orelse return false;
+    const e = k.foldItems(k.choose(.routed, .prefill, shape) orelse return false);
     if (!std.mem.eql(u8, e.id, "mlx.routed.prefill.matrix") and !std.mem.eql(u8, e.id, "mlx.routed.prefill.skew")) return false;
     var args: hl.Args = .{};
     try args.add(a);
