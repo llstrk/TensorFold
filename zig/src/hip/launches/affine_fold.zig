@@ -22,6 +22,8 @@ pub const Copies = struct {
     bytes: usize = 0,
     /// The most bytes the copies may take.
     limit: usize,
+    /// While set, a dry run (the counting stream) makes the copies its products read, on this stream: at load.
+    prepare: ?abi.Stream = null,
 
     pub const min_rows = 512;
 
@@ -29,6 +31,19 @@ pub const Copies = struct {
         var it = c.map.valueIterator();
         while (it.next()) |v| if (v.*) |*b| b.free();
         c.map.deinit(c.gpa);
+    }
+
+    /// The copies made (a product past `limit` keeps none).
+    pub fn made(c: *const Copies) usize {
+        var n: usize = 0;
+        var it = c.map.valueIterator();
+        while (it.next()) |v| n += @intFromBool(v.* != null);
+        return n;
+    }
+
+    /// A dry run's product: its copy made on `prepare` when set, the one the first prompt would make (same bits).
+    fn ahead(c: *Copies, r: *const runtime.Runtime, k: *const Kernels, a: Arg) Error!void {
+        if (c.prepare) |s| _ = try c.of(r, k, a, s);
     }
 
     /// The copy of `a`'s weights, made on `s` if not yet; null where it is not taken.
@@ -92,8 +107,9 @@ pub const Functions = struct {
 pub fn copyFor(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream) Error!?u64 {
     if (!k.matrix or !k.matrix_fold or a.route.items != 0) return null;
     const c = k.copies orelse return null;
-    if (s == util.counting) return if (a.m >= Copies.min_rows and a.fp16 == 0 and (a.bits == 4 or a.bits == 5) and @rem(a.k, 64) == 0) 1 else null;
-    return c.of(r, k, a, s);
+    if (s != util.counting) return c.of(r, k, a, s);
+    try c.ahead(r, k, a);
+    return if (a.m >= Copies.min_rows and a.fp16 == 0 and (a.bits == 4 or a.bits == 5) and @rem(a.k, 64) == 0) 1 else null;
 }
 
 /// wmma_fold16 over `w16` (copyFor's) with x read as the streams a.x normed by `rinv` and `scale` (HcNorm).
@@ -149,13 +165,15 @@ pub fn pairFoldRun(k: *const Kernels, r: *const runtime.Runtime, a: Arg, limit: 
 
 /// blockGo's fold cases, true when launched: a product on its BF16 copy, or the tall plan (`b`: wmma_fold's index).
 pub fn blockGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, kind: BlockKind, b: usize, args: *hl.Args) Error!bool {
-    if ((kind == .matrix or kind == .skew) and k.matrix_fold and items == 1 and a.route.items == 0 and s != util.counting) {
-        if (k.copies) |c| if (try c.of(r, k, a, s)) |w16| {
+    if ((kind == .matrix or kind == .skew) and k.matrix_fold and items == 1 and a.route.items == 0) if (k.copies) |c| {
+        if (s == util.counting) {
+            try c.ahead(r, k, a);
+        } else if (try c.of(r, k, a, s)) |w16| {
             try args.add(w16);
             try Kernels.go(r, k.folds.wmma_fold16[@intCast(a.bits - 4)], .{ .x = Kernels.cdiv(a.n, 128), .y = Kernels.cdiv(a.m, 128) }, .{ .x = 256 }, s, args);
             return true;
-        };
-    }
+        }
+    };
     if (a.route.items == 0 or a.m <= 128) return false;
     if ((kind != .matrix and kind != .skew) or !k.matrix_fold or (a.bits != 4 and a.bits != 5) or a.m > 256) return Kernels.refuse("tall plan");
     const grid: hl.Dim3 = .{ .x = Kernels.cdiv(a.n, 128), .y = 1, .z = @intCast(items) };

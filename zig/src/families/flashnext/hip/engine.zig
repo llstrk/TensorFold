@@ -170,7 +170,7 @@ pub const Engine = struct {
         // every weight is on the device now: only the n-gram rows a gather reads stay resident
         const live = try e.tables.spans(e.keep.allocator());
         e.ck.releaseExcept(live);
-        e.arena = try hip.Arena.init(&e.driver, try e.fittedScratch());
+        e.arena = try hip.Arena.init(&e.driver, try e.scratchAndCopies());
         errdefer e.arena.deinit();
         e.drawer = try serve.draw.Drawer.init(
             gpa,
@@ -275,13 +275,34 @@ pub const Engine = struct {
             cache.max_window * e.weights.model.dims.wide() * e.act.size();
     }
 
+    /// fittedScratch, its dry run also making fold=bf16's BF16 copies on the stream: the ones a first prompt made.
+    fn scratchAndCopies(e: *Engine) !usize {
+        const c = e.lib.affine.copies orelse return e.fittedScratch();
+        const t0 = std.Io.Clock.awake.now(e.io);
+        c.prepare = e.stream.handle;
+        defer c.prepare = null;
+        const bytes = try e.fittedScratch();
+        try e.stream.synchronize();
+        if (e.o.rank == 0) std.log.info("fold=bf16: {d} BF16 weight copies, {d:.2} GiB, made at load in {d} ms", .{
+            c.made(),
+            @as(f64, @floatFromInt(c.bytes)) / (1 << 30),
+            @divTrunc(t0.durationTo(std.Io.Clock.awake.now(e.io)).toNanoseconds(), std.time.ns_per_ms),
+        });
+        return bytes;
+    }
+
+    /// Device bytes of fold=bf16's copies: made at load, outside what the streams and the prompt cache are sized from.
+    pub fn foldBytes(e: *const Engine) usize {
+        return if (e.lib.affine.copies) |c| c.bytes else 0;
+    }
+
     /// The scratch for `o.chunk` rows, or the fallback's when the larger chunk admits fewer of the streams asked for.
     fn fittedScratch(e: *Engine) !usize {
         const larger = try e.scratchBytes();
         const small = e.o.fallback orelse return larger;
         if (small >= e.o.chunk) return larger;
         const pool = try hip.admission.budget(e.gpa, e.io, e.ctx);
-        const room = pool.room(hip.usage(false).device);
+        const room = pool.room(hip.usage(false).device) + e.foldBytes();
         const asked = e.o.chunk;
         e.o.chunk = small;
         const smaller = try e.scratchBytes();

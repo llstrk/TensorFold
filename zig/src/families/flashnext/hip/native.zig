@@ -174,7 +174,8 @@ fn prepare(
         "the native HIP engine cannot read the GPU's memory ({s})",
         .{@errorName(err)},
     );
-    const room = pool.room(hip.usage(false).device);
+    // fold=bf16's copies, made at load, stay outside the room as when the first prompt made them
+    const room = pool.room(hip.usage(false).device) + e.foldBytes();
     const per = e.streamBytes(capacity(mine.window));
     // the least over the ranks: a follower takes a stream's caches when rank 0 begins it
     const fit: usize = @intCast((try steps.together(a, .{ room / per, 0 }, .least, problem))[0]);
