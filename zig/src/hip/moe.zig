@@ -178,7 +178,7 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
     const expert_rows = expertRows(rows, r.top_k, r.count());
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
-    const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
+    const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows, ex.limit)) |t| t else blk: {
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const t: Tensor = .{ .ptr = act, .kind = kind };

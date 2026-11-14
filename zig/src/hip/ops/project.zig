@@ -86,9 +86,9 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
 }
 
 /// The routed gate and up with the activation as the epilogue; null when the format or the tile does not take it.
-pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
+pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize, limit: f32) Error!?Tensor {
     switch (proj.handle) {
-        .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, limit),
+        .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows, limit),
         .dense, .bf16 => return null,
     }
 }
@@ -335,7 +335,7 @@ pub fn affineGroup(o: Ops, x: Tensor, ws: []const Affine, m: usize, outs: []Tens
 }
 
 /// Routed gate and up in one launch, silu(gate) * up as epilogue into x's kind; null when the tile cannot.
-pub fn affineRoutedAct(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
+pub fn affineRoutedAct(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize, limit: f32) Error!?Tensor {
     const z = o.l;
     if (o.prefill) {
         // fold=on: the gate and up's fold tile with the activation as its epilogue, the same bits as the two launches
@@ -358,7 +358,7 @@ pub fn affineRoutedAct(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, m
             .fp16 = 0,
             .route = .{ .items = items, .members = members, .x_div = int(x_div) },
         };
-        if (try affine_fold.pairFoldRun(&z.affine, z.r, arg, limit, int(count), int(pairs), out, o.stream)) return .{ .ptr = out, .kind = x.kind };
+        if (try affine_fold.pairFoldRun(&z.affine, z.r, arg, limit, int(count), int(pairs), int(expert_rows), out, o.stream)) return .{ .ptr = out, .kind = x.kind };
         o.arena.release(mark);
         return null;
     }

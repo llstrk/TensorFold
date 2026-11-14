@@ -140,12 +140,13 @@ pub fn foldMixGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, xs: u64, 
 }
 
 /// A routed gate and up and its activation into `out` (pairs, width) on the fold tile; false, nothing launched, if not.
-pub fn pairFoldRun(k: *const Kernels, r: *const runtime.Runtime, a: Arg, limit: f32, items: c_int, pairs: c_int, out: u64, s: abi.Stream) Error!bool {
+pub fn pairFoldRun(k: *const Kernels, r: *const runtime.Runtime, a: Arg, limit: f32, items: c_int, pairs: c_int, expert_rows: c_int, out: u64, s: abi.Stream) Error!bool {
     if (!k.matrix or !k.matrix_fold or (a.bits != 4 and a.bits != 5) or a.fp16 != 0) return false;
     if (@mod(a.n, 128) != 0 or @mod(a.k, 64) != 0) return false;
     var shape = Kernels.shapeOf(a, items);
     shape.plan_pairs = @intCast(@max(pairs, 0));
-    const e = k.foldItems(k.choose(.routed, .prefill, shape) orelse return false);
+    shape.expert_rows = @intCast(@max(expert_rows, 0));
+    const e = k.foldItems(k.choose(.routed, .prefill, shape) orelse return false, expert_rows);
     if (!std.mem.eql(u8, e.id, "mlx.routed.prefill.matrix") and !std.mem.eql(u8, e.id, "mlx.routed.prefill.skew")) return false;
     var args: hl.Args = .{};
     try args.add(a);
