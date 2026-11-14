@@ -494,6 +494,7 @@ pub const Fx = struct {
         const e = f.e;
         const m = &e.weights.model;
         const row_bytes = m.dims.wide() * m.act.size();
+        const keyed_drafts = head_mod.keyedOn();
         for (requests) |r| {
             const lane = f.lanes.get(r.stream) orelse return error.UnknownStream;
             if (lane.pending) |p| try f.mark(lane, if (r.rows) |kept| kept.len else p.rows);
@@ -538,7 +539,12 @@ pub const Fx = struct {
             while (d < depth) : (d += 1) {
                 var tok: [1]u32 = undefined;
                 var prob: [1]f32 = undefined;
-                try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob);
+                // a sampled stream drafts what its verify row will draw (the target's keyed rule)
+                const keyed: ?head_mod.Keyed = if (sampling(r.stream)) |sp| (if (sp.temperature > 0 and keyed_drafts)
+                    .{ .gpa = f.gpa, .s = sp, .position = r.position + d, .dtype = e.drawer.dtype }
+                else
+                    null) else null;
+                try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob, keyed);
                 lane.held[d] = tok[0];
                 chained = d + 1;
                 if (d + 1 == depth or prob[0] < stop_under) break;
