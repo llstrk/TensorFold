@@ -427,14 +427,14 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
-        return e.promptMarked(c, tokens, null);
+        return e.promptMarked(c, tokens, &.{});
     }
 
-    /// `prompt`, the state before `mark`'s row written aside (forward.Mark).
-    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, mark: ?forward.Mark) !forward.Out {
+    /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
+    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
         if (e.stopped) return error.GroupStopped;
         // the next chunk staged while the last forward runs, in staging that forward's uploads no longer read
-        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .mark = mark }};
+        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .marks = marks }};
         const len = e.host.staging.bytes.len;
         const half = len / 2;
         var staged: ?forward.Staged = null;
