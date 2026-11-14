@@ -115,8 +115,10 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     var plain_notes: hip.Policy.Notes = .{};
     const plain = hip.Policy.resolve(o.policy, .current, &plain_notes) catch policy;
     const own_default = o.tp == 1 and plain.prefill_step != policy.prefill_step;
-    const fallback_step: ?u32 = if (own_default) plain.prefill_step else null;
-    if (fallback_step) |s| notes.add("prefill_step {d} is this GPU's default, {d} when it admits fewer streams; ", .{
+    // a step past the GPU's own (TF_POLICY prefill_step=16384) also falls back to it rather than refuse a stream
+    const gpu_step = hip.Policy.forCaps(caps, o.tp).prefill_step;
+    const fallback_step: ?u32 = if (own_default) plain.prefill_step else if (o.tp == 1 and policy.prefill_step > gpu_step) gpu_step else null;
+    if (fallback_step) |s| notes.add("prefill_step {d}, down to {d} when it admits fewer streams; ", .{
         policy.prefill_step,
         s,
     });

@@ -304,13 +304,22 @@ pub const Engine = struct {
         const pool = try hip.admission.budget(e.gpa, e.io, e.ctx);
         const room = pool.room(hip.usage(false).device) + e.foldBytes();
         const asked = e.o.chunk;
+        const per = e.streamBytes(e.o.capacity);
         e.o.chunk = small;
         const smaller = try e.scratchBytes();
-        if (!narrows(room, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
+        if (!narrows(room, larger, smaller, per, e.o.want)) {
             e.o.chunk = asked;
             return larger;
         }
         e.narrowed = asked;
+        // the largest halved step between that admits the streams the fallback does
+        var step = asked / 128 * 64;
+        while (step > small) : (step = step / 128 * 64) {
+            e.o.chunk = step;
+            const bytes = try e.scratchBytes();
+            if (!narrows(room, bytes, smaller, per, e.o.want)) return bytes;
+        }
+        e.o.chunk = small;
         return smaller;
     }
 
