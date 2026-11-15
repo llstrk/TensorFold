@@ -108,7 +108,7 @@ __device__ __forceinline__ void wmma_fold_cols_tile(typename Dec::Args& a, const
         for (int v = 0; v < 4; ++v) xdst[v] = xreg[v];
     };
 
-    const int wm = wave & 3, wn = wave >> 2;
+    const int wm = wave >> 1, wn = wave & 1;  // as wmma_fold_tile: a few-row block's busy waves on different SIMDs
     const int rl = lane & 15, rh = lane >> 4;
     const bool live0 = wm * 32 < rows_left;
     const bool live1 = wm * 32 + 16 < rows_left;

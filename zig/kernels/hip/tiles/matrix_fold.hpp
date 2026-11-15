@@ -107,7 +107,8 @@ __device__ __forceinline__ void wmma_fold_tile(typename Dec::Args& a) {
         for (int v = 0; v < 4; ++v) xdst[v] = xreg[v];
     };
 
-    const int wm = wave & 3, wn = wave >> 2;
+    // waves in pairs a row band: a block of few rows (an expert's item) has its busy waves on different SIMDs
+    const int wm = wave >> 1, wn = wave & 1;
     const int rl = lane & 15, rh = lane >> 4;
     const bool live0 = wm * 32 < rows_left && n0 + wn * 64 < a.n;  // a wave past the columns (n = 320, 48) multiplies nothing
     const bool live1 = wm * 32 + 16 < rows_left;
