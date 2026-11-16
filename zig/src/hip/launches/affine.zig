@@ -15,6 +15,7 @@ const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
 const stream_pick = @import("stream_pick.zig");
 const stream_layout = @import("stream_layout.zig");
+const stream = @import("affine_stream.zig");
 
 const Error = runtime.Error;
 
@@ -181,32 +182,7 @@ pub const Kernels = struct {
                     k.lanes[b][r][p] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_lanesINS0_{s}ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineE", .{ dot, bits, rows, pieces }));
                 }
             }
-            inline for (stream_rows, 0..) |rows, r| {
-                inline for (stream_cbs, 0..) |cb, c| {
-                    k.stream[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb0EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.pairs[b][r][c] = if (cb * rows <= 16)
-                        try m.function(std.fmt.comptimePrint("_ZN2tf4rocm18affine_dot2_streamINS0_{s}ELi{d}ELi{d}ELi{d}ELb1EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }))
-                    else
-                        null;
-                    k.relu2[b][r][c] = if (cb * rows <= 16)
-                        try m.function(
-                            std.fmt.comptimePrint("_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}" ++
-                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }),
-                        )
-                    else
-                        null;
-                    k.relu2_pair[b][r][c] = if (cb * rows <= 16)
-                        try m.function(
-                            std.fmt.comptimePrint("_ZN2tf4rocm29affine_dot2_stream_relu2_pairINS0_{s}" ++
-                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineES3_iii", .{ dot, bits, rows, cb }),
-                        )
-                    else
-                        null;
-                }
-            }
+            try stream.resolve(k, dot, bits, b, m);
         }
     }
 
@@ -221,17 +197,17 @@ pub const Kernels = struct {
     }
 
     /// Launches on `s`; the counting stream runs nothing.
-    fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
+    pub fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
         if (s == util.counting) return;
         try hl.launch(f, .{ .grid = grid, .block = block }, .{ .r = r, .handle = s }, args);
     }
 
-    fn refuse(what: []const u8) Error {
+    pub fn refuse(what: []const u8) Error {
         std.log.err("affine: {s}", .{what});
         return error.Invalid;
     }
 
-    fn bitIndex(bits: c_int) ?usize {
+    pub fn bitIndex(bits: c_int) ?usize {
         return std.mem.indexOfScalar(c_int, &bit_widths, bits);
     }
 
@@ -243,7 +219,7 @@ pub const Kernels = struct {
         };
     }
 
-    fn cdiv(n: c_int, by: c_int) c_uint {
+    pub fn cdiv(n: c_int, by: c_int) c_uint {
         return @intCast(@divTrunc(n + by - 1, by));
     }
 
@@ -315,58 +291,8 @@ pub const Kernels = struct {
 
     // ---- the tiles ----
 
-    /// The stream tile on `total_n` columns (a group's sum); `sides` counts them off block by block when it has any.
-    pub fn streamGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, sides_in: StreamSides, total_n: c_int, items: c_int, s: abi.Stream) Error!void {
-        return k.streamWith(r, a, sides_in, total_n, items, s, false);
-    }
-
-    /// `streamGo` with Nemotron's relu^2 as the epilogue: `a.out16` takes relu(round(sum))^2 in the activation type.
-    pub fn relu2Go(k: *const Kernels, r: *const runtime.Runtime, a: Arg, items: c_int, s: abi.Stream) Error!void {
-        if (a.out16 == 0 or a.out != 0) return refuse("relu2 output");
-        return k.streamWith(r, a, .{}, a.n, items, s, true);
-    }
-
-    fn streamWith(
-        k: *const Kernels,
-        r: *const runtime.Runtime,
-        a: Arg,
-        sides_in: StreamSides,
-        total_n: c_int,
-        items: c_int,
-        s: abi.Stream,
-        relu2: bool,
-    ) Error!void {
-        const b = bitIndex(a.bits).?;
-        var sides = sides_in;
-        var lpc_log2: u5 = 0;
-        while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-        const ri = stream_pick.rowTile(a.m);
-        const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, total_n, items, sides.pair_cols > 0);
-        const per_block = tile.per_block;
-        var blocks: c_uint = cdiv(total_n, per_block);
-        if (sides.count > 0) {
-            blocks = 0;
-            for (0..@intCast(sides.count)) |i| {
-                sides.first[i] = @intCast(blocks);
-                blocks += cdiv(sides.n[i], per_block);
-            }
-            sides.first[@intCast(sides.count)] = @intCast(blocks);
-        }
-        var args: hl.Args = .{};
-        try args.add(a);
-        try args.add(sides);
-        try args.add(@as(c_int, lpc_log2));
-        try args.add(@as(c_int, switch (a.group) {
-            32 => 0,
-            64 => 1,
-            else => 2,
-        }));
-        const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
-        const f = table[b][ri][tile.at].?;
-        // a column block's row blocks run next to each other on x, so the later ones read its weights from cache
-        const grid = stream_layout.grid(k.stream_interleave, blocks, cdiv(a.m, stream_rows[ri]), items);
-        try go(r, f, grid, .{ .x = 32 * stream_waves }, s, &args);
-    }
+    pub const streamGo = stream.streamGo;
+    pub const relu2Go = stream.relu2Go;
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
     pub fn rowGo(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int) Error!void {
